@@ -470,7 +470,7 @@ Field StrayFieldFFTExecutor::exec() const {
                                     mpad->device_ptr(comp), counts.data(),
                                     displs.data(), mpiReal, session.communicator());
         if (result != MPI_SUCCESS) {
-          MPI_Abort(session.communicator(), result);
+          session.abort(result);
         }
       }
 

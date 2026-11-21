@@ -1,15 +1,62 @@
 #include "session.hpp"
 
 #include <cuda_runtime_api.h>
+#include <mpi-ext.h>
 #include <mpi.h>
 
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <cstdlib>
 
 namespace {
 bool multiGpuRequested = false;
+class MpiRuntime {
+ public:
+  MpiRuntime() {
+    int fFinalized = 0;
+    int fInitialized = 0;
+    if (MPI_Finalized(&fFinalized) != MPI_SUCCESS) {
+      throw std::runtime_error("Cannot check whether MPI has been finalized.");
+    }
+    if (fFinalized != 0) {
+      throw std::runtime_error(
+          "Cannot create a multi-GPU session: MPI has already been finalized.");
+    }
+    if (MPI_Initialized(&fInitialized) != MPI_SUCCESS) {
+      throw std::runtime_error("Cannot check whether MPI has been initialized.");
+    }
+
+    if (fInitialized == 0) {
+      if (MPI_Init(nullptr, nullptr) != MPI_SUCCESS) {
+        throw std::runtime_error("Cannot initialize MPI.");
+      }
+      ownsMpi_ = true;
+    }
+  }
+  ~MpiRuntime() noexcept {
+    if (!ownsMpi_)
+      return;
+
+    int finalized = 0;
+    if (MPI_Finalized(&finalized) != MPI_SUCCESS) {
+      std::cerr << "Cannot check MPI finalization state.\n";
+      return;
+    }
+
+    if (!finalized && MPI_Finalize() != MPI_SUCCESS)
+      std::cerr << "MPI finalization failed.\n";
+  }
+
+ private:
+  bool ownsMpi_ = false;
+};
+
+MpiRuntime& mpiRuntime() {
+  static MpiRuntime runtime;
+  return runtime;
 }
+}  // namespace
 
 void Session::setMultiGpuEnabled(bool enabled) {
   multiGpuRequested = enabled;
@@ -21,25 +68,7 @@ Session::Session() : multiGpuEnabled_(multiGpuRequested) {
     return;
   }
 
-  int fFinalized = 0;
-  int fInitialized = 0;
-  if (MPI_Finalized(&fFinalized) != MPI_SUCCESS) {
-    throw std::runtime_error("Cannot check whether MPI has been finalized.");
-  }
-  if (fFinalized != 0) {
-    throw std::runtime_error(
-        "Cannot create a multi-GPU session: MPI has already been finalized.");
-  }
-  if (MPI_Initialized(&fInitialized) != MPI_SUCCESS) {
-    throw std::runtime_error("Cannot check whether MPI has been initialized.");
-  }
-
-  if (fInitialized == 0) {
-    if (MPI_Init(nullptr, nullptr) != MPI_SUCCESS) {
-      throw std::runtime_error("Cannot initialize MPI.");
-    }
-    ownsMpi_ = true;
-  }
+  mpiRuntime();
 
   // Both newly initialized and borrowed MPI use the same setup below.
   try {
@@ -70,22 +99,27 @@ Session::Session() : multiGpuEnabled_(multiGpuRequested) {
       throw std::runtime_error(std::string("Cannot select GPU: ") +
                                cudaGetErrorString(error));
     }
+
+    if (MPIX_Query_cuda_support() != 1) {
+      throw std::runtime_error("This MPI build has no CUDA aware support!");
+    }
   } catch (const std::exception& error) {
     // A failed constructor has no destructor. Stop the whole MPI job so another
     // rank cannot wait forever for this process to join a distributed operation.
-    std::cerr << "Session startup failed on rank " << rank_ << ": "
-              << error.what() << std::endl;
-    MPI_Abort(comm_, 1);
-    throw;
+    std::cerr << "Session startup failed on rank " << rank_ << ": " << error.what()
+              << std::endl;
+    this->abort(1);
   }
 }
 
-Session::~Session() {
-  if (!multiGpuEnabled_) {
-    return;
-  }
+Session::~Session() = default;
 
-  if (ownsMpi_) {
-    MPI_Finalize();
-  }
+[[noreturn]] void Session::abort(int errorCode) const noexcept {
+    if (multiGpuEnabled_) {
+        int finalized = 0;
+        if (MPI_Finalized(&finalized) == MPI_SUCCESS && !finalized)
+            MPI_Abort(comm_, errorCode == 0 ? 1 : errorCode);
+    }
+
+    std::abort();
 }

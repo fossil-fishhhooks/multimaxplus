@@ -27,11 +27,12 @@ class Session {
   int rank() const { return rank_; }
   int size() const { return nproc_; }
 
+  [[noreturn]] void abort(int errorCode = 1) const noexcept;
+
  private:
   bool multiGpuEnabled_;
   int rank_ = 0;
   int nproc_ = 1;
   int device_ = -1;
-  bool ownsMpi_ = false;
   MPI_Comm comm_ = MPI_COMM_WORLD;
 };
