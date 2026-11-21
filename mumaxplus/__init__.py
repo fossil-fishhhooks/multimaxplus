@@ -26,6 +26,11 @@ _parser.add_argument(
     "(DOUBLE, 2 or 64) precision. This argument takes precedence over the "
     "environment variable MUMAXPLUS_FP_PRECISION.",
 )
+_parser.add_argument(
+    "--multigpu",
+    action="store_true",
+    help="Enable the experimental multi-GPU session for subsequently created worlds.",
+)
 _args, _ = _parser.parse_known_args()
 FP_PRECISION: str = _args.fp_precision  # Can be None
 
@@ -57,6 +62,10 @@ match _FP_allowed_vals.get(FP_PRECISION.upper()):
         import _mumaxpluscpp_double as _cpp
     case _:
         raise RuntimeError(f"Unknown MUMAXPLUS_FP_PRECISION='{FP_PRECISION}'")
+
+# Single-GPU execution remains the default. Each backend session snapshots this
+# setting when its World is constructed.
+_cpp._set_multigpu_enabled(_args.multigpu)
 
 ## Populate the "mumaxplus." namespace
 from .altermagnet import Altermagnet

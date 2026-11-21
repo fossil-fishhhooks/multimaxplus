@@ -1,3 +1,5 @@
+find_package(MPI REQUIRED COMPONENTS CXX)
+
 add_library(core STATIC 
     butchertableau.cpp
     butchertableau.hpp
@@ -24,6 +26,8 @@ add_library(core STATIC
     rungekutta.hpp
     scalarquantity.cpp 
     scalarquantity.hpp
+    session.cpp
+    session.hpp
     shift.cu
     shift.hpp
     stepper.cpp
@@ -45,4 +49,4 @@ add_library(core STATIC
 target_include_directories(core PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_include_directories(core PUBLIC .)
 
-target_link_libraries(core PUBLIC cudautil physics)
+target_link_libraries(core PUBLIC cudautil physics MPI::MPI_CXX)

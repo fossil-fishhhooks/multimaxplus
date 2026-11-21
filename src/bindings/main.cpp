@@ -1,7 +1,11 @@
+#include "session.hpp"
 #include "wrappers.hpp"
 
 PYBIND11_MODULE(MUMAX_MODULE_NAME, m) {
   m.attr("FP_PRECISION") = FP_PRECISION;
+  m.def("_set_multigpu_enabled", &Session::setMultiGpuEnabled,
+        py::arg("enabled"),
+        "Configure multi-GPU initialization for subsequently created worlds.");
   wrap_fieldquantity(m);
   wrap_altermagnetfieldquantity(m);
   wrap_antiferromagnetfieldquantity(m);
