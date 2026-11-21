@@ -1,4 +1,7 @@
-#include <cufft.h>
+#include <cufftMp.h>
+#include "session.hpp"
+#include "world.hpp"
+#include <mpi.h>
 
 #include <memory>
 #include <vector>
@@ -165,38 +168,89 @@ StrayFieldFFTExecutor::StrayFieldFFTExecutor(const Magnet* magnet,
       kfft(6),
       hfft(3),
       mfft(3) {
-  int3 size = kernel_.grid().size();
-  fftSize = {size.x / 2 + 1, size.y, size.z};
-  int ncells = fftSize.x * fftSize.y * fftSize.z;
 
-  for (auto& p : kfft)
-    cudaMalloc(reinterpret_cast<void**>(&p), ncells * sizeof(complex));
-  for (auto& p : mfft)
-    cudaMalloc(reinterpret_cast<void**>(&p), ncells * sizeof(complex));
-  for (auto& p : hfft)
-    cudaMalloc(reinterpret_cast<void**>(&p), ncells * sizeof(complex));
+  const Session& session = magnet_->world()->session();
+  MPI_Comm comm = session.communicator();
+  if(session.multiGpuEnabled()){
 
-  checkCufftResult(cufftPlan3d(&forwardPlan, size.z, size.y, size.x, FFT));
-  checkCufftResult(cufftPlan3d(&backwardPlan, size.z, size.y, size.x, IFFT));
+    // setup cuFFTMp first
+    cufftCreate(&forwardPlan); // in cuFFTMp you must make plans in 2 calls
+    cufftCreate(&backwardPlan);
 
-  cufftSetStream(forwardPlan, getCudaStream());
-  cufftSetStream(backwardPlan, getCudaStream());
+    size_t worksize = 0;
+    cufftMpMakePlan3d(forwardPlan, size.z, size.y, size.x, FFT, &comm, CUFFT_COMM_MPI, &worksize);
+    cufftMpMakePlan3d(backwardPlan, size.z, size.y, size.x, IFFT, &comm, CUFFT_COMM_MPI, &worksize);
 
-  for (int comp = 0; comp < 6; comp++)
-    checkCufftResult(
-        fftExec(forwardPlan, kernel_.field().device_ptr(comp), kfft.at(comp)));
+    cufftSetStream(forwardPlan, getCudaStream());
+    cufftSetStream(backwardPlan, getCudaStream());
+
+    int3 size = kernel_.grid().size();
+    fftSize = {size.x / 2 + 1, size.y, size.z};
+    int ncells = fftSize.x * fftSize.y * fftSize.z;
+
+    for (auto& desc : kfft)
+      checkCufftResult(cufftXtMalloc(forwardPlan, &desc, CUFFT_XT_FORMAT_INPLACE));
+    for (auto& desc : mfft)
+      checkCufftResult(cufftXtMalloc(forwardPlan, &desc, CUFFT_XT_FORMAT_INPLACE));
+    for (auto& desc : hfft)
+      checkCufftResult(cufftXtMalloc(backwardPlan, &desc, CUFFT_XT_FORMAT_INPLACE));
+
+
+
+    // STILL BAD
+    for (int comp = 0; comp < 6; comp++)
+      checkCufftResult(
+          fftExec(forwardPlan, kernel_.field().device_ptr(comp), kfft.at(comp)));
+
+
+
+
+  } else {
+
+
+    for (auto& p : kfft)
+      cudaMalloc(reinterpret_cast<void**>(&p), ncells * sizeof(complex));
+    for (auto& p : mfft)
+      cudaMalloc(reinterpret_cast<void**>(&p), ncells * sizeof(complex));
+    for (auto& p : hfft)
+      cudaMalloc(reinterpret_cast<void**>(&p), ncells * sizeof(complex));
+
+    checkCufftResult(cufftMpPlan3d(&forwardPlan, size.z, size.y, size.x, FFT));
+    checkCufftResult(cufftMpPlan3d(&backwardPlan, size.z, size.y, size.x, IFFT));
+
+    cufftSetStream(forwardPlan, getCudaStream());
+    cufftSetStream(backwardPlan, getCudaStream());
+
+    for (int comp = 0; comp < 6; comp++)
+        checkCufftResult(
+           fftExec(forwardPlan, kernel_.field().device_ptr(comp), kfft.at(comp)));
+  }
 }
 
 StrayFieldFFTExecutor::~StrayFieldFFTExecutor() {
-  for (auto p : mfft)
-    cudaFree(p);
-  for (auto p : kfft)
-    cudaFree(p);
-  for (auto p : hfft)
-    cudaFree(p);
+  const Session& session = magnet_->world()->session();
+  if(session.multiGpuEnabled()){
+    for (auto desc : mfft)
+      cufftXtFree(desc);
+    for (auto desc : kfft)
+      cufftXtFree(desc);
+    for (auto desc : hfft)
+      cufftXtFree(desc);
 
-  checkCufftResult(cufftDestroy(forwardPlan));
-  checkCufftResult(cufftDestroy(backwardPlan));
+    checkCufftResult(cufftDestroy(forwardPlan));
+    checkCufftResult(cufftDestroy(backwardPlan));
+  }
+  else {
+    for (auto p : mfft)
+      cudaFree(p);
+    for (auto p : kfft)
+      cudaFree(p);
+    for (auto p : hfft)
+      cudaFree(p);
+
+    checkCufftResult(cufftDestroy(forwardPlan));
+    checkCufftResult(cufftDestroy(backwardPlan));
+  }
 }
 
 Field StrayFieldFFTExecutor::exec() const {

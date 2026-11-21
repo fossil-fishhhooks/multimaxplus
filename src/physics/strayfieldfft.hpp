@@ -1,6 +1,7 @@
 #pragma once
 
-#include <cufft.h>
+#include <cufftMp.h>
+#include <mpi.h>
 
 #include <memory>
 #include <vector>
