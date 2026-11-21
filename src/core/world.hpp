@@ -4,6 +4,7 @@
 
 #include "datatypes.hpp"
 #include "grid.hpp"
+#include "session.hpp"
 
 class TimeSolver;
 
@@ -69,6 +70,9 @@ class World {
 
   /** Return a reference to the world's timesolver. */
   TimeSolver& timesolver() const;
+
+ private:
+  Session session_;
 
  protected:
   real3 cellsize_;

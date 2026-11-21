@@ -7,7 +7,8 @@
 #include "timesolver.hpp"
 
 World::World(real3 cellsize, Grid mastergrid, int3 pbcRepetitions)
-    : cellsize_(cellsize),
+    : session_(),
+      cellsize_(cellsize),
       mastergrid_(mastergrid),
       pbcRepetitions_(pbcRepetitions),
       timesolver_(TimeSolver::Factory::create()) {
