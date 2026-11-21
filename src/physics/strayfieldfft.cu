@@ -27,11 +27,13 @@ const cufftType FFT = CUFFT_R2C;
 const cufftType IFFT = CUFFT_C2R;
 const auto& fftExec = cufftExecR2C;
 const auto& ifftExec = cufftExecC2R;
+const MPI_Datatype mpiReal = MPI_FLOAT;
 #elif FP_PRECISION == DOUBLE
 const cufftType FFT = CUFFT_D2Z;
 const cufftType IFFT = CUFFT_Z2D;
 const auto& fftExec = cufftExecD2Z;
 const auto& ifftExec = cufftExecZ2D;
+const MPI_Datatype mpiReal = MPI_DOUBLE;
 #endif
 
 #define __CUDAOP__ inline __device__ __host__
@@ -441,6 +443,41 @@ Field StrayFieldFFTExecutor::exec() const {
                                          cudaMemcpyDeviceToDevice, stream));
       }
 
+      // reassembly
+      std::vector<int> counts(session.size());
+      std::vector<int> displs(session.size());
+
+      const int3 size = kernel_.grid().size();
+      const bool is2D = (size.z == 1);
+
+      const int planes = is2D ? size.y : size.z;
+      const int valuesPerPlane = is2D ? size.x : size.x * size.y;
+
+      const int base = planes / session.size();
+      const int extra = planes % session.size();
+
+      for (int r = 0; r < session.size(); r++) {
+        const int planeCount = base + (r < extra ? 1 : 0);
+        const int firstPlane = r * base + std::min(r, extra);
+        counts.at(r) = planeCount * valuesPerPlane;
+        displs.at(r) = firstPlane * valuesPerPlane;
+      }
+
+      checkCudaError(cudaStreamSynchronize(getCudaStream()));
+
+      for (int comp = 0; comp < 3; comp++) {
+        int result = MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL,
+                                    mpad->device_ptr(comp), counts.data(),
+                                    displs.data(), mpiReal, session.communicator());
+        if (result != MPI_SUCCESS) {
+          MPI_Abort(session.communicator(), result);
+        }
+      }
+
+      // unpad
+      Field h(system_, 3);
+      cudaLaunch(h.grid().ncells(), k_unpad, h.cu(), mpad->cu());
+      return h;
   } else {
 
     // Forward fourier transforms
