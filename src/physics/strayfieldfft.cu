@@ -3,7 +3,9 @@
 #include "world.hpp"
 #include <mpi.h>
 
+#include <cmath>
 #include <memory>
+#include <stdexcept>
 #include <algorithm>
 #include <vector>
 
@@ -182,11 +184,24 @@ StrayFieldFFTExecutor::StrayFieldFFTExecutor(const Magnet* magnet,
 
   if(session.multiGpuEnabled()){
 
+    const bool is2D = (size.z == 1);
+    const int processes = session.size();
+    // Built-in slabs split the first two plan dimensions across ranks.
+    // Validate before creating plans so invalid grids allocate no plan resources.
+    if (is2D && (size.y < processes || size.x < processes)) {
+      throw std::invalid_argument(
+          "cuFFTMp 2D FFT requires grid dimensions y and x to each be at least "
+          "the MPI process count.");
+    }
+    if (!is2D && (size.z < processes || size.y < processes)) {
+      throw std::invalid_argument(
+          "cuFFTMp 3D FFT requires grid dimensions z and y to each be at least "
+          "the MPI process count.");
+    }
+
     // setup cuFFTMp first
     checkCufftResult(cufftCreate(&forwardPlan)); // in cuFFTMp you must make plans in 2 calls
-    checkCufftResultcufftCreate(&backwardPlan));
-
-    bool is2D = (size.z == 1);
+    checkCufftResult(cufftCreate(&backwardPlan));
 
     int localPlanes;
     int firstPlane, endPlane;
@@ -230,6 +245,10 @@ StrayFieldFFTExecutor::StrayFieldFFTExecutor(const Magnet* magnet,
     const size_t destinationPitch = paddedRowLength * sizeof(real);
     const size_t localInputBytes = localRows * destinationPitch;
     
+    sourceOffset_ = sourceOffset;
+    sourcePitch_ = sourcePitch;
+    destinationPitch_ = destinationPitch;
+    localRows_ = localRows;
 
     size_t worksize = 0;
     if(is2D){
@@ -334,32 +353,123 @@ Field StrayFieldFFTExecutor::exec() const {
     cudaLaunch(mpad->grid().ncells(), k_pad, mpad->cu(), hostmag.cu(), ms.cu());
   }
 
-  // Forward fourier transforms
-  for (int comp = 0; comp < 3; comp++)
-    checkCufftResult(fftExec(forwardPlan, mpad->device_ptr(comp), mfft.at(comp)));
 
-  // apply kernel on m_fft
-  int ncells = fftSize.x * fftSize.y * fftSize.z;
-  complex preFactor{-MU0 / kernel_.grid().ncells(), 0};
-  if (kernel_.grid().size().z == 1 && kernel_.grid().origin().z == 0) {
-    // if the h field and m field are two dimensional AND are in the same plane
-    // (kernel grid origin at z=0) then the kernel matrix has only 4 relevant
-    // components and a more efficient cuda kernel can be used:
-    cudaLaunch(ncells, k_apply_kernel_2d, hfft.at(0), hfft.at(1), hfft.at(2),
-               mfft.at(0), mfft.at(1), mfft.at(2), kfft.at(0), kfft.at(1), kfft.at(2),
-               kfft.at(3), preFactor, ncells);
+  const Session& session = magnet_->world()->session();
+
+  if (session.multiGpuEnabled()) {
+      std::vector<complex*> localH(3);
+      std::vector<complex*> localM(3);
+      std::vector<complex*> localK(6);
+
+      for (int comp = 0; comp < 3; comp++) {
+        real* src = mpad->device_ptr(comp) + sourceOffset_;
+        real* dest =
+            static_cast<real*>(mdesc.at(comp)->descriptor->data[0]);
+
+        const auto stream = getCudaStream();
+        checkCudaError(cudaMemcpy2DAsync(dest, destinationPitch_, src, sourcePitch_,
+                                        sourcePitch_, localRows_, cudaMemcpyDeviceToDevice,
+                                        stream));
+
+        mdesc.at(comp)->subFormat = CUFFT_XT_FORMAT_INPLACE;
+        checkCufftResult(cufftXtExecDescriptor(
+                        forwardPlan,
+                        mdesc.at(comp),
+                        mdesc.at(comp),
+                        CUFFT_FORWARD));
+        localH.at(comp) =
+                static_cast<complex*>(hdesc.at(comp)->descriptor->data[0]);
+        localM.at(comp) =
+                static_cast<complex*>(mdesc.at(comp)->descriptor->data[0]);
+        localK.at(comp) =
+                static_cast<complex*>(kdesc.at(comp)->descriptor->data[0]);
+      }
+      // extra ones that dont get copied from the loop
+      localK.at(3) = static_cast<complex*>(kdesc.at(3)->descriptor->data[0]);
+      localK.at(4) = static_cast<complex*>(kdesc.at(4)->descriptor->data[0]);
+      localK.at(5) = static_cast<complex*>(kdesc.at(5)->descriptor->data[0]);
+
+      int ncells = 0;
+      // apply kernel on m_fft
+      if (kernel_.grid().size().z == 1) {
+        const int processes = session.size();
+        const int rank = session.rank();
+
+        const int localX =
+            fftSize.x / processes +
+            (rank < fftSize.x % processes ? 1 : 0);  // maybe, confirm this
+
+        ncells = fftSize.y * localX;
+      } else {
+        const int processes = session.size();
+        const int rank = session.rank();
+
+        const int localY =
+            fftSize.y / processes +
+            (rank < fftSize.y % processes ? 1 : 0);  // maybe, confirm this
+
+        ncells = fftSize.x * localY * fftSize.z;
+      }
+
+      complex preFactor{-MU0 / kernel_.grid().ncells(), 0};
+      if (ncells > 0) {
+      if (kernel_.grid().size().z == 1 && kernel_.grid().origin().z == 0) {
+        // if the h field and m field are two dimensional AND are in the same plane
+        // (kernel grid origin at z=0) then the kernel matrix has only 4 relevant
+        // components and a more efficient cuda kernel can be used:
+        cudaLaunch(ncells, k_apply_kernel_2d, localH.at(0), localH.at(1), localH.at(2),
+                   localM.at(0), localM.at(1), localM.at(2), localK.at(0), localK.at(1),
+                   localK.at(2), localK.at(3), preFactor, ncells);
+      } else {
+        cudaLaunch(ncells, k_apply_kernel_3d, localH.at(0), localH.at(1), localH.at(2),
+                   localM.at(0), localM.at(1), localM.at(2), localK.at(0), localK.at(1),
+                   localK.at(2), localK.at(3), localK.at(4), localK.at(5), preFactor, ncells);
+      }
+      }
+
+      for (int comp = 0; comp < 3; comp++) {
+        hdesc.at(comp)->subFormat = CUFFT_XT_FORMAT_INPLACE_SHUFFLED;
+        checkCufftResult(cufftXtExecDescriptor(backwardPlan, hdesc.at(comp),
+                                               hdesc.at(comp), CUFFT_INVERSE));
+
+        real* dest = mpad->device_ptr(comp) + sourceOffset_;
+        real* src = static_cast<real*>(hdesc.at(comp)->descriptor->data[0]);
+
+        const auto stream = getCudaStream();
+        checkCudaError(cudaMemcpy2DAsync(dest, sourcePitch_, src, destinationPitch_,
+                                         sourcePitch_, localRows_,
+                                         cudaMemcpyDeviceToDevice, stream));
+      }
+
   } else {
-    cudaLaunch(ncells, k_apply_kernel_3d, hfft.at(0), hfft.at(1), hfft.at(2),
-               mfft.at(0), mfft.at(1), mfft.at(2), kfft.at(0), kfft.at(1), kfft.at(2),
-               kfft.at(3), kfft.at(4), kfft.at(5), preFactor, ncells);
+
+    // Forward fourier transforms
+    for (int comp = 0; comp < 3; comp++)
+      checkCufftResult(fftExec(forwardPlan, mpad->device_ptr(comp), mfft.at(comp)));
+
+    // apply kernel on m_fft
+    int ncells = fftSize.x * fftSize.y * fftSize.z;
+    complex preFactor{-MU0 / kernel_.grid().ncells(), 0};
+    if (kernel_.grid().size().z == 1 && kernel_.grid().origin().z == 0) {
+      // if the h field and m field are two dimensional AND are in the same plane
+      // (kernel grid origin at z=0) then the kernel matrix has only 4 relevant
+      // components and a more efficient cuda kernel can be used:
+      cudaLaunch(ncells, k_apply_kernel_2d, hfft.at(0), hfft.at(1), hfft.at(2),
+                mfft.at(0), mfft.at(1), mfft.at(2), kfft.at(0), kfft.at(1), kfft.at(2),
+                kfft.at(3), preFactor, ncells);
+    } else {
+      cudaLaunch(ncells, k_apply_kernel_3d, hfft.at(0), hfft.at(1), hfft.at(2),
+                mfft.at(0), mfft.at(1), mfft.at(2), kfft.at(0), kfft.at(1), kfft.at(2),
+                kfft.at(3), kfft.at(4), kfft.at(5), preFactor, ncells);
+    }
+
+    // backward fourier transfrom
+    for (int comp = 0; comp < 3; comp++)
+      checkCufftResult(ifftExec(backwardPlan, hfft.at(comp), mpad->device_ptr(comp)));
+
+    // unpad
+    Field h(system_, 3);
+    cudaLaunch(h.grid().ncells(), k_unpad, h.cu(), mpad->cu());
+    return h;
   }
-
-  // backward fourier transfrom
-  for (int comp = 0; comp < 3; comp++)
-    checkCufftResult(ifftExec(backwardPlan, hfft.at(comp), mpad->device_ptr(comp)));
-
-  // unpad
-  Field h(system_, 3);
-  cudaLaunch(h.grid().ncells(), k_unpad, h.cu(), mpad->cu());
-  return h;
 }

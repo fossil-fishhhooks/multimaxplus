@@ -4,6 +4,7 @@
 #include <mpi.h>
 
 #include <memory>
+#include <cstddef>
 #include <vector>
 
 #include "datatypes.hpp"
@@ -53,6 +54,10 @@ class StrayFieldFFTExecutor : public StrayFieldExecutor {
 
  private:
   StrayFieldKernel kernel_;
+  std::size_t sourceOffset_ = 0;
+  std::size_t sourcePitch_ = 0;
+  std::size_t destinationPitch_ = 0;
+  std::size_t localRows_ = 0;
   int3 fftSize;
   std::vector<complex*> kfft, mfft, hfft;
   std::vector<cudaLibXtDesc*> kdesc, mdesc, hdesc;
