@@ -13,7 +13,7 @@ set(NVSHMEM_ROOT "" CACHE PATH "NVSHMEM prefix containing lib/ or lib64/")
 find_path(CUFFTMP_INCLUDE_DIR
     NAMES cufftMp.h
     HINTS "${CUFFTMP_ROOT}" "$ENV{CUFFTMP_ROOT}" "$ENV{CUFFTMP_HOME}"
-    PATH_SUFFIXES include
+    PATH_SUFFIXES include/cufftmp include
 )
 
 # cuFFTMp requires the shared NVSHMEM host library, not static NVSHMEM.
@@ -22,7 +22,7 @@ set(CMAKE_FIND_LIBRARY_SUFFIXES ".so")
 find_library(CUFFTMP_LIBRARY
     NAMES cufftMp
     HINTS "${CUFFTMP_ROOT}" "$ENV{CUFFTMP_ROOT}" "$ENV{CUFFTMP_HOME}"
-    PATH_SUFFIXES lib lib64
+    PATH_SUFFIXES lib64/cufftmp lib/cufftmp lib64 lib
 )
 find_library(NVSHMEM_HOST_LIBRARY
     NAMES nvshmem_host
@@ -58,6 +58,7 @@ if(cuFFTMp_FOUND)
         add_library(cuFFTMp::cuFFTMp SHARED IMPORTED GLOBAL)
         set_target_properties(cuFFTMp::cuFFTMp PROPERTIES
             IMPORTED_LOCATION "${CUFFTMP_LIBRARY}"
+            IMPORTED_NO_SYSTEM TRUE
             INTERFACE_INCLUDE_DIRECTORIES "${CUFFTMP_INCLUDE_DIR}"
             INTERFACE_LINK_LIBRARIES "NVSHMEM::host;CUDA::cuda_driver"
         )
