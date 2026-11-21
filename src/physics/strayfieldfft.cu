@@ -9,6 +9,9 @@
 #include <algorithm>
 #include <vector>
 
+#include <chrono>
+#include <iostream>
+
 #include "constants.hpp"
 #include "cudalaunch.hpp"
 #include "field.hpp"
@@ -340,6 +343,21 @@ StrayFieldFFTExecutor::~StrayFieldFFTExecutor() {
 }
 
 Field StrayFieldFFTExecutor::exec() const {
+  using Clock = std::chrono::steady_clock;
+
+  checkCudaError(cudaDeviceSynchronize());
+  auto previous = Clock::now();
+
+  auto checkpoint = [&]() {
+    checkCudaError(cudaDeviceSynchronize());
+
+    auto now = Clock::now();
+    double ms = std::chrono::duration<double, std::milli>(now - previous).count();
+
+    previous = now;
+    return ms;
+  };
+
   // pad m, and multiply with msat
   std::shared_ptr<System> kernelSystem =
       std::make_shared<System>(magnet_->world(), kernel_.grid());
@@ -359,6 +377,8 @@ Field StrayFieldFFTExecutor::exec() const {
   const Session& session = magnet_->world()->session();
 
   if (session.multiGpuEnabled()) {
+      double padMs = checkpoint();
+
       std::vector<complex*> localH(3);
       std::vector<complex*> localM(3);
       std::vector<complex*> localK(6);
@@ -390,6 +410,8 @@ Field StrayFieldFFTExecutor::exec() const {
       localK.at(3) = static_cast<complex*>(kdesc.at(3)->descriptor->data[0]);
       localK.at(4) = static_cast<complex*>(kdesc.at(4)->descriptor->data[0]);
       localK.at(5) = static_cast<complex*>(kdesc.at(5)->descriptor->data[0]);
+
+      double copyAndForwardMs = checkpoint();
 
       int ncells = 0;
       // apply kernel on m_fft
@@ -429,6 +451,8 @@ Field StrayFieldFFTExecutor::exec() const {
       }
       }
 
+      double multiplyMs = checkpoint();
+
       for (int comp = 0; comp < 3; comp++) {
         hdesc.at(comp)->subFormat = CUFFT_XT_FORMAT_INPLACE_SHUFFLED;
         checkCufftResult(cufftXtExecDescriptor(backwardPlan, hdesc.at(comp),
@@ -442,6 +466,8 @@ Field StrayFieldFFTExecutor::exec() const {
                                          sourcePitch_, localRows_,
                                          cudaMemcpyDeviceToDevice, stream));
       }
+
+      double inverseAndCopyMs = checkpoint();
 
       // reassembly
       std::vector<int> counts(session.size());
@@ -473,10 +499,17 @@ Field StrayFieldFFTExecutor::exec() const {
           session.abort(result);
         }
       }
+      double gatherMs = checkpoint();
 
       // unpad
       Field h(system_, 3);
       cudaLaunch(h.grid().ncells(), k_unpad, h.cu(), mpad->cu());
+
+      double unpadMs = checkpoint();
+      std::cerr << "rank=" << session.rank() << " pad=" << padMs
+                << " copy+forward=" << copyAndForwardMs << " multiply=" << multiplyMs
+                << " inverse+copy=" << inverseAndCopyMs << " gather=" << gatherMs
+                << " unpad=" << unpadMs << " ms\n";
       return h;
   } else {
 
