@@ -71,6 +71,8 @@ class World {
   /** Return a reference to the world's timesolver. */
   TimeSolver& timesolver() const;
 
+  const Session& session() const { return session_; }
+
  private:
   Session session_;
 

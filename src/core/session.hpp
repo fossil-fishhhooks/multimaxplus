@@ -23,6 +23,10 @@ class Session {
   Session(Session&&) = delete;
   Session& operator=(Session&&) = delete;
 
+  MPI_Comm communicator() const { return comm_; }
+  int rank() const { return rank_; }
+  int size() const { return nproc_; }
+
  private:
   bool multiGpuEnabled_;
   int rank_ = 0;
