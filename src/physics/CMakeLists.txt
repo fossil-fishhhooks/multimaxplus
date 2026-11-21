@@ -104,8 +104,9 @@ target_include_directories(physics PUBLIC .)
 
 target_link_libraries(physics PUBLIC core linsolver)
 
-link_directories(${CUDA_LIBRARY_DIR})
-target_link_libraries(physics PRIVATE cufft curand)
+# The public FFT header includes cufftMp.h, so propagate its include path.
+# cuFFTMp also provides the normal cuFFT symbols; do not additionally link cufft.
+target_link_libraries(physics PUBLIC cuFFTMp::cuFFTMp PRIVATE CUDA::curand)
 
 
 # On Windows, the cufft and curand DLLs (also required by mumax³) are not found by default.

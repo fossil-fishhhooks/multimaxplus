@@ -1,5 +1,3 @@
-find_package(MPI REQUIRED COMPONENTS CXX)
-
 add_library(core STATIC 
     butchertableau.cpp
     butchertableau.hpp

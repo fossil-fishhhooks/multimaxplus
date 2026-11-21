@@ -24,6 +24,13 @@ add_definitions(-DMUMAX_MODULE_NAME=${MUMAX_MODULE_NAME})
 
 add_definitions(-D_USE_MATH_DEFINES) # Needed for cmath constants on Windows
 
+# Discover shared dependencies here so their imported targets are visible to
+# every subdirectory (including the Python bindings and command-line executable).
+find_package(MPI REQUIRED COMPONENTS CXX)
+find_package(CUDAToolkit REQUIRED)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+find_package(cuFFTMp REQUIRED)
+
 add_subdirectory(src/bindings)
 add_subdirectory(src/cmd)
 add_subdirectory(src/core)
