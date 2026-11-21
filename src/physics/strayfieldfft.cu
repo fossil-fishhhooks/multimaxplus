@@ -382,6 +382,10 @@ Field StrayFieldFFTExecutor::exec() const {
       std::vector<complex*> localH(3);
       std::vector<complex*> localM(3);
       std::vector<complex*> localK(6);
+      double inputCopyMs = 0.0;
+      double forwardMs = 0.0;
+      double inverseMs = 0.0;
+      double outputCopyMs = 0.0;
 
       for (int comp = 0; comp < 3; comp++) {
         real* src = mpad->device_ptr(comp) + sourceOffset_;
@@ -392,6 +396,7 @@ Field StrayFieldFFTExecutor::exec() const {
         checkCudaError(cudaMemcpy2DAsync(dest, destinationPitch_, src, sourcePitch_,
                                         sourcePitch_, localRows_, cudaMemcpyDeviceToDevice,
                                         stream));
+        inputCopyMs += checkpoint();
 
         mdesc.at(comp)->subFormat = CUFFT_XT_FORMAT_INPLACE;
         checkCufftResult(cufftXtExecDescriptor(
@@ -399,6 +404,7 @@ Field StrayFieldFFTExecutor::exec() const {
                         mdesc.at(comp),
                         mdesc.at(comp),
                         CUFFT_FORWARD));
+        forwardMs += checkpoint();
         localH.at(comp) =
                 static_cast<complex*>(hdesc.at(comp)->descriptor->data[0]);
         localM.at(comp) =
@@ -411,7 +417,7 @@ Field StrayFieldFFTExecutor::exec() const {
       localK.at(4) = static_cast<complex*>(kdesc.at(4)->descriptor->data[0]);
       localK.at(5) = static_cast<complex*>(kdesc.at(5)->descriptor->data[0]);
 
-      double copyAndForwardMs = checkpoint();
+      double copyAndForwardMs = inputCopyMs + forwardMs + checkpoint();
 
       int ncells = 0;
       // apply kernel on m_fft
@@ -457,6 +463,7 @@ Field StrayFieldFFTExecutor::exec() const {
         hdesc.at(comp)->subFormat = CUFFT_XT_FORMAT_INPLACE_SHUFFLED;
         checkCufftResult(cufftXtExecDescriptor(backwardPlan, hdesc.at(comp),
                                                hdesc.at(comp), CUFFT_INVERSE));
+        inverseMs += checkpoint();
 
         real* dest = mpad->device_ptr(comp) + sourceOffset_;
         real* src = static_cast<real*>(hdesc.at(comp)->descriptor->data[0]);
@@ -465,9 +472,10 @@ Field StrayFieldFFTExecutor::exec() const {
         checkCudaError(cudaMemcpy2DAsync(dest, sourcePitch_, src, destinationPitch_,
                                          sourcePitch_, localRows_,
                                          cudaMemcpyDeviceToDevice, stream));
+        outputCopyMs += checkpoint();
       }
 
-      double inverseAndCopyMs = checkpoint();
+      double inverseAndCopyMs = inverseMs + outputCopyMs + checkpoint();
 
       // reassembly
       std::vector<int> counts(session.size());
@@ -490,6 +498,7 @@ Field StrayFieldFFTExecutor::exec() const {
       }
 
       checkCudaError(cudaStreamSynchronize(getCudaStream()));
+      double gatherSetupMs = checkpoint();
 
       for (int comp = 0; comp < 3; comp++) {
         int result = MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL,
@@ -507,8 +516,11 @@ Field StrayFieldFFTExecutor::exec() const {
 
       double unpadMs = checkpoint();
       std::cerr << "rank=" << session.rank() << " pad=" << padMs
+                << " input-copy=" << inputCopyMs << " forward=" << forwardMs
                 << " copy+forward=" << copyAndForwardMs << " multiply=" << multiplyMs
-                << " inverse+copy=" << inverseAndCopyMs << " gather=" << gatherMs
+                << " inverse=" << inverseMs << " output-copy=" << outputCopyMs
+                << " inverse+copy=" << inverseAndCopyMs
+                << " gather-setup=" << gatherSetupMs << " gather=" << gatherMs
                 << " unpad=" << unpadMs << " ms\n";
       return h;
   } else {
