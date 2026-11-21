@@ -81,8 +81,7 @@ __global__ void k_pad(CuField out, CuField in, CuParameter msat) {
   }
 }
 
-__global__ void k_unpad(CuField out, CuField in) {
-  int outIdx = blockIdx.x * blockDim.x + threadIdx.x;
+__device__ void unpadCell(CuField out, CuField in, int outIdx) {
 
   // When outside the geometry of destiny field, set to zero and return
   // early
@@ -106,6 +105,20 @@ __global__ void k_unpad(CuField out, CuField in) {
   for (int c = 0; c < out.ncomp; c++) {
     out.setValueInCell(outIdx, c, in.valueAt(inIdx, c));
   }
+}
+
+
+__global__ void k_unpad(CuField out, CuField in) {
+  unpadCell(out, in, blockIdx.x * blockDim.x + threadIdx.x);
+}
+
+// Extract only output cells whose padded input planes belong to this rank.
+__global__ void k_unpad_local(CuField out, CuField in, int firstOutputIdx,
+                             int outputCount) {
+  int localIdx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (localIdx >= outputCount)
+    return;
+  unpadCell(out, in, firstOutputIdx + localIdx);
 }
 
 static void checkCufftResult(cufftResult result) {
@@ -477,32 +490,47 @@ Field StrayFieldFFTExecutor::exec() const {
 
       double inverseAndCopyMs = inverseMs + outputCopyMs + checkpoint();
 
-      // reassembly
+      // Crop locally, then assemble only the physical output on every rank.
+      // k_unpad selects the last outputSize cells along each padded axis.
+      Field h(system_, 3);
       std::vector<int> counts(session.size());
       std::vector<int> displs(session.size());
 
       const int3 size = kernel_.grid().size();
+      const int3 outputSize = h.grid().size();
       const bool is2D = (size.z == 1);
-
       const int planes = is2D ? size.y : size.z;
-      const int valuesPerPlane = is2D ? size.x : size.x * size.y;
-
+      const int outputPlanes = is2D ? outputSize.y : outputSize.z;
+      const int outputValuesPerPlane =
+          is2D ? outputSize.x : outputSize.x * outputSize.y;
+      const int cropStart = planes - outputPlanes;
       const int base = planes / session.size();
       const int extra = planes % session.size();
 
       for (int r = 0; r < session.size(); r++) {
         const int planeCount = base + (r < extra ? 1 : 0);
         const int firstPlane = r * base + std::min(r, extra);
-        counts.at(r) = planeCount * valuesPerPlane;
-        displs.at(r) = firstPlane * valuesPerPlane;
+        // Clip this rank's padded slab to the physical output interval.
+        const int firstOutputPlane =
+            std::min(outputPlanes, std::max(0, firstPlane - cropStart));
+        const int endOutputPlane = std::min(
+            outputPlanes, std::max(0, firstPlane + planeCount - cropStart));
+        counts.at(r) = (endOutputPlane - firstOutputPlane) * outputValuesPerPlane;
+        displs.at(r) = firstOutputPlane * outputValuesPerPlane;
       }
-
-      checkCudaError(cudaStreamSynchronize(getCudaStream()));
       double gatherSetupMs = checkpoint();
+
+      const int localCount = counts.at(session.rank());
+      if (localCount > 0) {
+        cudaLaunch(localCount, k_unpad_local, h.cu(), mpad->cu(),
+                   displs.at(session.rank()), localCount);
+      }
+      // Finish the local writes before MPI reads the device buffer.
+      double unpadMs = checkpoint();
 
       for (int comp = 0; comp < 3; comp++) {
         int result = MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL,
-                                    mpad->device_ptr(comp), counts.data(),
+                                    h.device_ptr(comp), counts.data(),
                                     displs.data(), mpiReal, session.communicator());
         if (result != MPI_SUCCESS) {
           session.abort(result);
@@ -510,11 +538,6 @@ Field StrayFieldFFTExecutor::exec() const {
       }
       double gatherMs = checkpoint();
 
-      // unpad
-      Field h(system_, 3);
-      cudaLaunch(h.grid().ncells(), k_unpad, h.cu(), mpad->cu());
-
-      double unpadMs = checkpoint();
       std::cerr << "rank=" << session.rank() << " pad=" << padMs
                 << " input-copy=" << inputCopyMs << " forward=" << forwardMs
                 << " copy+forward=" << copyAndForwardMs << " multiply=" << multiplyMs
