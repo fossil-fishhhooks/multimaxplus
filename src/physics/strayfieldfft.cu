@@ -374,10 +374,10 @@ Field StrayFieldFFTExecutor::exec() const {
   }
 
 
+  double padMs = checkpoint();
   const Session& session = magnet_->world()->session();
 
   if (session.multiGpuEnabled()) {
-      double padMs = checkpoint();
 
       std::vector<complex*> localH(3);
       std::vector<complex*> localM(3);
@@ -516,6 +516,7 @@ Field StrayFieldFFTExecutor::exec() const {
     // Forward fourier transforms
     for (int comp = 0; comp < 3; comp++)
       checkCufftResult(fftExec(forwardPlan, mpad->device_ptr(comp), mfft.at(comp)));
+    double forwardMs = checkpoint();
 
     // apply kernel on m_fft
     int ncells = fftSize.x * fftSize.y * fftSize.z;
@@ -533,13 +534,20 @@ Field StrayFieldFFTExecutor::exec() const {
                 kfft.at(3), kfft.at(4), kfft.at(5), preFactor, ncells);
     }
 
+    double multiplyMs = checkpoint();
+
     // backward fourier transfrom
     for (int comp = 0; comp < 3; comp++)
       checkCufftResult(ifftExec(backwardPlan, hfft.at(comp), mpad->device_ptr(comp)));
+    double inverseMs = checkpoint();
 
     // unpad
     Field h(system_, 3);
     cudaLaunch(h.grid().ncells(), k_unpad, h.cu(), mpad->cu());
+    double unpadMs = checkpoint();
+    std::cerr << "mode=normal rank=" << session.rank() << " pad=" << padMs
+              << " forward=" << forwardMs << " multiply=" << multiplyMs
+              << " inverse=" << inverseMs << " unpad=" << unpadMs << " ms\n";
     return h;
   }
 }
