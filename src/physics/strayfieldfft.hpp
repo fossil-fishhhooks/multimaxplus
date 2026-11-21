@@ -55,6 +55,7 @@ class StrayFieldFFTExecutor : public StrayFieldExecutor {
   StrayFieldKernel kernel_;
   int3 fftSize;
   std::vector<complex*> kfft, mfft, hfft;
+  std::vector<cudaLibXtDesc*> kdesc, mdesc, hdesc;
   cufftHandle forwardPlan;
   cufftHandle backwardPlan;
 };

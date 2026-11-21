@@ -4,6 +4,7 @@
 #include <mpi.h>
 
 #include <memory>
+#include <algorithm>
 #include <vector>
 
 #include "constants.hpp"
@@ -167,43 +168,107 @@ StrayFieldFFTExecutor::StrayFieldFFTExecutor(const Magnet* magnet,
               switchingradius),
       kfft(6),
       hfft(3),
-      mfft(3) {
+      mfft(3),
+      kdesc(6),
+      mdesc(3),
+      hdesc(3) {
 
   const Session& session = magnet_->world()->session();
   MPI_Comm comm = session.communicator();
-  if(session.multiGpuEnabled()){
-
-    // setup cuFFTMp first
-    cufftCreate(&forwardPlan); // in cuFFTMp you must make plans in 2 calls
-    cufftCreate(&backwardPlan);
-
-    size_t worksize = 0;
-    cufftMpMakePlan3d(forwardPlan, size.z, size.y, size.x, FFT, &comm, CUFFT_COMM_MPI, &worksize);
-    cufftMpMakePlan3d(backwardPlan, size.z, size.y, size.x, IFFT, &comm, CUFFT_COMM_MPI, &worksize);
-
-    cufftSetStream(forwardPlan, getCudaStream());
-    cufftSetStream(backwardPlan, getCudaStream());
 
     int3 size = kernel_.grid().size();
     fftSize = {size.x / 2 + 1, size.y, size.z};
     int ncells = fftSize.x * fftSize.y * fftSize.z;
 
-    for (auto& desc : kfft)
+  if(session.multiGpuEnabled()){
+
+    // setup cuFFTMp first
+    checkCufftResult(cufftCreate(&forwardPlan)); // in cuFFTMp you must make plans in 2 calls
+    checkCufftResultcufftCreate(&backwardPlan));
+
+    bool is2D = (size.z == 1);
+
+    int localPlanes;
+    int firstPlane, endPlane;
+    if(is2D){
+      const int rank = session.rank();
+      const int processes = session.size();
+
+      const int planes = size.y;
+
+      const int base = planes / processes;
+      const int extra = planes % processes;
+
+      localPlanes = base + (rank < extra ? 1 : 0);
+      firstPlane = rank * base + std::min(rank, extra);
+      endPlane = firstPlane + localPlanes;  // exclusive
+    } else {
+      const int rank = session.rank();
+      const int processes = session.size();
+
+      const int planes = size.z;
+
+      const int base = planes / processes;
+      const int extra = planes % processes;
+
+      localPlanes = base + (rank < extra ? 1 : 0);
+      firstPlane = rank * base + std::min(rank, extra);
+      endPlane = firstPlane + localPlanes;  // exclusive
+    }
+    const size_t rowLength = size.x;
+    const size_t paddedRowLength = 2 * (rowLength / 2 + 1);
+
+    const size_t rowsPerPlane = is2D ? 1 : size.y;
+    const size_t localRows = localPlanes * rowsPerPlane;
+
+    // Offset measured in real values, not bytes
+    const size_t sourceOffset =
+        firstPlane * rowsPerPlane * rowLength;
+
+    // CUDA copy pitches are measured in bytes i think
+    const size_t sourcePitch = rowLength * sizeof(real);
+    const size_t destinationPitch = paddedRowLength * sizeof(real);
+    const size_t localInputBytes = localRows * destinationPitch;
+    
+
+    size_t worksize = 0;
+    if(is2D){
+      checkCufftResult(cufftMpMakePlan2d(forwardPlan, size.y, size.x, FFT, &comm, CUFFT_COMM_MPI, &worksize));
+      checkCufftResult(cufftMpMakePlan2d(backwardPlan, size.y, size.x, IFFT, &comm, CUFFT_COMM_MPI, &worksize));
+    }
+    else {
+      checkCufftResult(cufftMpMakePlan3d(forwardPlan, size.z, size.y, size.x, FFT, &comm, CUFFT_COMM_MPI, &worksize));
+      checkCufftResult(cufftMpMakePlan3d(backwardPlan, size.z, size.y, size.x, IFFT, &comm, CUFFT_COMM_MPI, &worksize));
+    }
+
+    checkCufftResult(cufftSetStream(forwardPlan, getCudaStream()));
+    checkCufftResult(cufftSetStream(backwardPlan, getCudaStream()));
+
+    
+
+    for (auto& desc : kdesc)
       checkCufftResult(cufftXtMalloc(forwardPlan, &desc, CUFFT_XT_FORMAT_INPLACE));
-    for (auto& desc : mfft)
+    for (auto& desc : mdesc)
       checkCufftResult(cufftXtMalloc(forwardPlan, &desc, CUFFT_XT_FORMAT_INPLACE));
-    for (auto& desc : hfft)
-      checkCufftResult(cufftXtMalloc(backwardPlan, &desc, CUFFT_XT_FORMAT_INPLACE));
+    for (auto& desc : hdesc)
+      checkCufftResult(cufftXtMalloc(backwardPlan, &desc, CUFFT_XT_FORMAT_INPLACE_SHUFFLED));
 
+    for (int comp = 0; comp < 6; comp++) {
+      // checkCufftResult(cufftXtExecDescriptor(forwardPlan, kfft.at(comp),
+      // kfft.at(comp), CUFFT_FORWARD)); // need tp get data in to kfft.at first!
 
+      real* src = kernel_.field().device_ptr(comp) + sourceOffset;
+      real* dest = static_cast<real*>(kdesc.at(comp)->descriptor->data[0]);  // set the pointer to the actual data
 
-    // STILL BAD
-    for (int comp = 0; comp < 6; comp++)
-      checkCufftResult(
-          fftExec(forwardPlan, kernel_.field().device_ptr(comp), kfft.at(comp)));
+      const auto stream = getCudaStream();
+      checkCudaError(cudaMemcpy2DAsync(dest, destinationPitch, src, sourcePitch,
+                                       sourcePitch, localRows, cudaMemcpyDeviceToDevice,
+                                       stream));  // actually write
 
-
-
+      // FFT TIME!
+      checkCufftResult(cufftXtExecDescriptor(forwardPlan, kdesc.at(comp),
+                                             kdesc.at(comp), CUFFT_FORWARD));
+    }
 
   } else {
 
@@ -215,8 +280,8 @@ StrayFieldFFTExecutor::StrayFieldFFTExecutor(const Magnet* magnet,
     for (auto& p : hfft)
       cudaMalloc(reinterpret_cast<void**>(&p), ncells * sizeof(complex));
 
-    checkCufftResult(cufftMpPlan3d(&forwardPlan, size.z, size.y, size.x, FFT));
-    checkCufftResult(cufftMpPlan3d(&backwardPlan, size.z, size.y, size.x, IFFT));
+    checkCufftResult(cufftPlan3d(&forwardPlan, size.z, size.y, size.x, FFT));
+    checkCufftResult(cufftPlan3d(&backwardPlan, size.z, size.y, size.x, IFFT));
 
     cufftSetStream(forwardPlan, getCudaStream());
     cufftSetStream(backwardPlan, getCudaStream());
@@ -230,11 +295,11 @@ StrayFieldFFTExecutor::StrayFieldFFTExecutor(const Magnet* magnet,
 StrayFieldFFTExecutor::~StrayFieldFFTExecutor() {
   const Session& session = magnet_->world()->session();
   if(session.multiGpuEnabled()){
-    for (auto desc : mfft)
+    for (auto desc : mdesc)
       cufftXtFree(desc);
-    for (auto desc : kfft)
+    for (auto desc : kdesc)
       cufftXtFree(desc);
-    for (auto desc : hfft)
+    for (auto desc : hdesc)
       cufftXtFree(desc);
 
     checkCufftResult(cufftDestroy(forwardPlan));
