@@ -9,8 +9,6 @@
 #include <algorithm>
 #include <vector>
 
-#include <chrono>
-#include <iostream>
 
 #include "constants.hpp"
 #include "cudalaunch.hpp"
@@ -356,21 +354,7 @@ StrayFieldFFTExecutor::~StrayFieldFFTExecutor() {
 }
 
 Field StrayFieldFFTExecutor::exec() const {
-  using Clock = std::chrono::steady_clock;
-
-  checkCudaError(cudaDeviceSynchronize());
-  auto previous = Clock::now();
-
-  auto checkpoint = [&]() {
-    checkCudaError(cudaDeviceSynchronize());
-
-    auto now = Clock::now();
-    double ms = std::chrono::duration<double, std::milli>(now - previous).count();
-
-    previous = now;
-    return ms;
-  };
-
+  
   // pad m, and multiply with msat
   std::shared_ptr<System> kernelSystem =
       std::make_shared<System>(magnet_->world(), kernel_.grid());
@@ -387,7 +371,6 @@ Field StrayFieldFFTExecutor::exec() const {
   }
 
 
-  double padMs = checkpoint();
   const Session& session = magnet_->world()->session();
 
   if (session.multiGpuEnabled()) {
@@ -395,10 +378,6 @@ Field StrayFieldFFTExecutor::exec() const {
       std::vector<complex*> localH(3);
       std::vector<complex*> localM(3);
       std::vector<complex*> localK(6);
-      double inputCopyMs = 0.0;
-      double forwardMs = 0.0;
-      double inverseMs = 0.0;
-      double outputCopyMs = 0.0;
 
       for (int comp = 0; comp < 3; comp++) {
         real* src = mpad->device_ptr(comp) + sourceOffset_;
@@ -409,7 +388,6 @@ Field StrayFieldFFTExecutor::exec() const {
         checkCudaError(cudaMemcpy2DAsync(dest, destinationPitch_, src, sourcePitch_,
                                         sourcePitch_, localRows_, cudaMemcpyDeviceToDevice,
                                         stream));
-        inputCopyMs += checkpoint();
 
         mdesc.at(comp)->subFormat = CUFFT_XT_FORMAT_INPLACE;
         checkCufftResult(cufftXtExecDescriptor(
@@ -417,7 +395,6 @@ Field StrayFieldFFTExecutor::exec() const {
                         mdesc.at(comp),
                         mdesc.at(comp),
                         CUFFT_FORWARD));
-        forwardMs += checkpoint();
         localH.at(comp) =
                 static_cast<complex*>(hdesc.at(comp)->descriptor->data[0]);
         localM.at(comp) =
@@ -430,7 +407,7 @@ Field StrayFieldFFTExecutor::exec() const {
       localK.at(4) = static_cast<complex*>(kdesc.at(4)->descriptor->data[0]);
       localK.at(5) = static_cast<complex*>(kdesc.at(5)->descriptor->data[0]);
 
-      double copyAndForwardMs = inputCopyMs + forwardMs + checkpoint();
+
 
       int ncells = 0;
       // apply kernel on m_fft
@@ -470,13 +447,11 @@ Field StrayFieldFFTExecutor::exec() const {
       }
       }
 
-      double multiplyMs = checkpoint();
 
       for (int comp = 0; comp < 3; comp++) {
         hdesc.at(comp)->subFormat = CUFFT_XT_FORMAT_INPLACE_SHUFFLED;
         checkCufftResult(cufftXtExecDescriptor(backwardPlan, hdesc.at(comp),
                                                hdesc.at(comp), CUFFT_INVERSE));
-        inverseMs += checkpoint();
 
         real* dest = mpad->device_ptr(comp) + sourceOffset_;
         real* src = static_cast<real*>(hdesc.at(comp)->descriptor->data[0]);
@@ -485,10 +460,8 @@ Field StrayFieldFFTExecutor::exec() const {
         checkCudaError(cudaMemcpy2DAsync(dest, sourcePitch_, src, destinationPitch_,
                                          sourcePitch_, localRows_,
                                          cudaMemcpyDeviceToDevice, stream));
-        outputCopyMs += checkpoint();
       }
 
-      double inverseAndCopyMs = inverseMs + outputCopyMs + checkpoint();
 
       // Crop locally, then assemble only the physical output on every rank.
       // k_unpad selects the last outputSize cells along each padded axis.
@@ -518,7 +491,6 @@ Field StrayFieldFFTExecutor::exec() const {
         counts.at(r) = (endOutputPlane - firstOutputPlane) * outputValuesPerPlane;
         displs.at(r) = firstOutputPlane * outputValuesPerPlane;
       }
-      double gatherSetupMs = checkpoint();
 
       const int localCount = counts.at(session.rank());
       if (localCount > 0) {
@@ -526,7 +498,6 @@ Field StrayFieldFFTExecutor::exec() const {
                    displs.at(session.rank()), localCount);
       }
       // Finish the local writes before MPI reads the device buffer.
-      double unpadMs = checkpoint();
 
       for (int comp = 0; comp < 3; comp++) {
         int result = MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL,
@@ -536,22 +507,12 @@ Field StrayFieldFFTExecutor::exec() const {
           session.abort(result);
         }
       }
-      double gatherMs = checkpoint();
-
-      std::cerr << "rank=" << session.rank() << " pad=" << padMs
-                << " input-copy=" << inputCopyMs << " forward=" << forwardMs
-                << " copy+forward=" << copyAndForwardMs << " multiply=" << multiplyMs
-                << " inverse=" << inverseMs << " output-copy=" << outputCopyMs
-                << " inverse+copy=" << inverseAndCopyMs
-                << " gather-setup=" << gatherSetupMs << " gather=" << gatherMs
-                << " unpad=" << unpadMs << " ms\n";
       return h;
   } else {
 
     // Forward fourier transforms
     for (int comp = 0; comp < 3; comp++)
       checkCufftResult(fftExec(forwardPlan, mpad->device_ptr(comp), mfft.at(comp)));
-    double forwardMs = checkpoint();
 
     // apply kernel on m_fft
     int ncells = fftSize.x * fftSize.y * fftSize.z;
@@ -569,20 +530,15 @@ Field StrayFieldFFTExecutor::exec() const {
                 kfft.at(3), kfft.at(4), kfft.at(5), preFactor, ncells);
     }
 
-    double multiplyMs = checkpoint();
 
     // backward fourier transfrom
     for (int comp = 0; comp < 3; comp++)
       checkCufftResult(ifftExec(backwardPlan, hfft.at(comp), mpad->device_ptr(comp)));
-    double inverseMs = checkpoint();
+
 
     // unpad
     Field h(system_, 3);
     cudaLaunch(h.grid().ncells(), k_unpad, h.cu(), mpad->cu());
-    double unpadMs = checkpoint();
-    std::cerr << "mode=normal rank=" << session.rank() << " pad=" << padMs
-              << " forward=" << forwardMs << " multiply=" << multiplyMs
-              << " inverse=" << inverseMs << " unpad=" << unpadMs << " ms\n";
     return h;
   }
 }
