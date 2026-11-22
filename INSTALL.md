@@ -1,156 +1,291 @@
-# Installing mumax⁺
+# Installing multimaxplus
 
-mumax⁺ can be installed in various ways, listed as the various options below in order of increasing difficulty. The following flowchart may guide you to the easiest option for your situation.
+Multimaxplus is an experimental fork of mumax⁺. Build this repository from source
+using the instructions below. Upstream `pip install mumaxplus` wheels do not
+contain this fork's changes.
 
-![Installation flowchart](docs/diagrams/installation/mumaxplus_installation.svg)
+The current build requires **Linux, CUDA, cuFFTMp, NVSHMEM, and Open MPI**, even
+for normal single-GPU execution. Multi-GPU execution is enabled separately with
+`--multigpu`; normal execution remains the default.
 
-## Option 1: Google Colab
+## Requirements
 
-If you don't have access to an NVIDIA GPU, you can run mumax⁺ online using Google Colab. Simply make a copy of [this Jupyter notebook](https://colab.research.google.com/github/mumax/plus/blob/master/examples/colab.ipynb) and you're good to go!
+- A Linux system supported by your NVIDIA HPC SDK release.
+- NVIDIA GPUs and a driver compatible with the selected CUDA/cuFFTMp release.
+- A C++17 compiler, GNU Fortran for SDK installation, and CMake >= 3.24.
+- Python >= 3.11, with development headers and virtual-environment support.
+- Matching CUDA, cuFFTMp, NVSHMEM, and CUDA-aware Open MPI libraries.
 
-## Option 2: Installing a pre-built wheel
+Our development configuration uses Ubuntu 24.04 on x86_64, Python 3.12, NVIDIA
+HPC SDK 26.5 with CUDA 13.2, and two A100 SXM4 80GB GPUs connected over NVLink.
+The commands below use that software combination as an example; adjust versions
+and paths to match your installation.
 
-If you prefer to use your own GPU for more demanding simulations, you must install the mumax⁺ Python package.
-If your system has
+Check NVIDIA's [cuFFTMp hardware and software requirements](https://docs.nvidia.com/cuda/cufftmp/usage/requirements.html)
+and the release notes for your SDK and driver. General CUDA compatibility alone
+does not establish cuFFTMp compatibility.
 
-- Python 3.11-3.15
-- an NVIDIA GPU with Compute Capability &geq;5.2
-- a CUDA driver of version &geq;550.54.15 on Linux or &geq;551.78 on Windows
+## 1. Install system dependencies
 
-then you can simply run `pip install mumaxplus` to automatically install mumax⁺ and its required dependencies in your active Python environment.
-
-> [!NOTE]
-> Some optional dependencies of mumax⁺ (e.g., for 3D plotting) are not installed by default to preserve disk space. Replace `mumaxplus` in the command above by `mumaxplus[all]` to enable all functionality.
-
-> [!TIP]
-> To install older mumax⁺ versions (&geq;1.2.0), you can use a variation of the following command:
-> ```bash
-> pip install mumaxplus -f https://github.com/mumax/plus/releases/expanded_assets/v1.2.0
-> ```
-
-## Option 3: Building from source
-
-mumax⁺ should work on any NVIDIA GPU. If no wheel is available for your system/GPU (or you want to contribute to mumax⁺ development), you will have to build mumax⁺ from source.
-
-For this, you must install the following tools yourself.
-Take care to avoid **version conflicts** between these different types of software and your hardware: click the arrows for more details.
-
-<details><summary>CUDA Toolkit</summary>
-
-To see which CUDA Toolkit works for your GPU's Compute Capability, check [this Stack Overflow post](https://stackoverflow.com/questions/28932864/which-compute-capability-is-supported-by-which-cuda-versions).
-
-* **Windows**: Download an installer from [the CUDA website](https://developer.nvidia.com/cuda-toolkit-archive).
-* **Linux**: Use `sudo apt-get install nvidia-cuda-toolkit`, or [download an installer](https://developer.nvidia.com/cuda-toolkit-archive).
-
-> ⚠️ Make especially sure that everything CUDA-related (like `nvcc`) can be found inside your PATH.
-> On Linux, for instance, this can be done by editing your `~/.bashrc` file and adding the following lines:
->
-> ```bash
-> # add CUDA
-> export PATH="/usr/local/cuda/bin:$PATH"
-> export LD_LIBRARY_PATH="/usr/local/cuda/> lib64:$LD_LIBRARY_PATH"
-> ```
->
-> The paths may differ if the CUDA Toolkit was installed in a different location.
-
-👉 *Check CUDA installation with: `nvcc --version`*
-
-</details>
-
-<details><summary>A C++ compiler which supports C++17</summary>
-
-* **Linux:** `sudo apt-get install gcc`
-  * ⚠️ Each CUDA version has a maximum supported `gcc` version, as listed in [this StackOverflow answer](https://stackoverflow.com/a/46380601). If necessary, use `sudo apt-get install gcc-<min_version>` instead, with the appropriate `<min_version>`.
-* **Windows:** [Microsoft Visual C++](https://visualstudio.microsoft.com/downloads/) (MSVC) must be used, since CUDA does not support `gcc` on Windows.
-  * ⚠️ Make sure you install a version of MSVC that is compatible with your installed CUDA toolkit, as listed in [this table](https://quasar.ugent.be/files/doc/cuda-msvc-compatibility.html) (e.g., MSVC 2026 does not yet seem to be supported by CUDA as of January 2026).
-  * During installation, check the box to include the "Desktop development with C++" workload.
-  * After installing, check if the path to `cl.exe` was added to your `PATH` environment variable (i.e., check whether `where cl.exe` returns an appropriate path like `C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.29.30133\bin\HostX64\x64`). If not, add it manually.
-
-👉 *Check C installation with: `gcc --version` on Linux and `where.exe cl.exe` on Windows.*
-
-</details>
-
-<details><summary>CPython <i>(version ≥ 3.11)</i>, pip and miniconda/anaconda</summary>
-
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;All these Python-related tools should be included in a standard installation of [Anaconda or Miniconda](https://www.anaconda.com/download/success).
-
-👉 *Check installation with `python --version`, `pip --version` and `conda --version`.*
-
-</details>
-
-### Option 3a: Installing a stable release from PyPI
-
-If you only need the latest stable version of mumax⁺, you should now be able to run
+For Ubuntu 24.04:
 
 ```bash
-pip install --no-binary=mumaxplus mumaxplus
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends \
+    build-essential gfortran pkg-config git ca-certificates \
+    python3.12 python3.12-dev python3.12-venv \
+    libnuma1 libnl-3-200 libnl-route-3-200 libibverbs1 ibverbs-providers
 ```
 
-This will install any Python dependencies of mumax⁺ and build mumax⁺ from source.
+Use the equivalent packages for another supported distribution.
 
-> [!NOTE]
-> Some optional dependencies of mumax⁺ (e.g., for 3D plotting) are not installed by default to preserve disk space. Use `pip install mumaxplus[all]` to enable all functionality.
+## 2. Install the NVIDIA HPC SDK
 
-### Option 3b: Installing a custom mumax⁺
+Download the appropriate installer from the
+[NVIDIA HPC SDK 26.5 download page](https://developer.nvidia.com/hpc-sdk/releases/26.5)
+and follow the [NVIDIA installation guide](https://docs.nvidia.com/hpc-sdk/installation-guide/index.html).
+For the example below, select the x86_64 package containing CUDA 13.2.
 
-If you need an older version of mumax⁺ or wish to contribute to its development, you will need Git.
-Click the dropdown below to download Git if you haven't installed it yet.
+Use the matching CUDA, MPI, cuFFTMp, and NVSHMEM components from that SDK.
+The example SDK location is:
 
-<details><summary>Git</summary>
+```text
+/opt/nvidia/hpc_sdk/Linux_x86_64/26.5
+```
 
-* **Windows:** [Download](https://git-scm.com/downloads) and install.
-* **Linux:** `sudo apt install git`
+You may install the SDK elsewhere; change `SDK` in step 4 accordingly.
+The NVIDIA driver must also be installed on the machine that runs simulations.
 
-👉 *Check Git installation with: `git --version`*
+## 3. Clone this fork and create a Python environment
 
-</details>
-
-First, clone the mumax⁺ Git repository using the following command, where the `--recursive` flag is used to get the pybind11 submodule that is needed to build mumax⁺.
+Run this from the directory where you want the checkout:
 
 ```bash
-git clone --recursive https://github.com/mumax/plus.git mumaxplus
-cd mumaxplus
+git clone --recursive https://github.com/fossil-fishhhooks/multimaxplus.git
+cd multimaxplus
+git submodule update --init --recursive
+
+python3.12 -m venv .venv
+source .venv/bin/activate
+
+python -m pip install --upgrade pip setuptools wheel 'cmake>=3.24' ninja
+python -m pip install 'numpy>=2' scipy matplotlib 'pyovf>=0.2.15' tqdm pytest pandas
 ```
 
-We recommend to install mumax⁺ in a clean conda environment as follows. You could also skip this step and use your own conda environment instead if preferred.
+The Python import name remains **`mumaxplus`**.
 
-<details><summary>Click to show tools automatically installed in the conda environment</summary>
+## 4. Configure the environment
 
-* cmake 4.0.0
-* Python 3.13
-* pybind11 v2.13.6
-* NumPy
-* matplotlib
-* SciPy
-* Sphinx
-
-</details>
+From the checkout root, with the virtual environment activated:
 
 ```bash
-conda env create -f environment.yml
-conda activate mumaxplus
+export SDK=/opt/nvidia/hpc_sdk/Linux_x86_64/26.5
+export NVSHMEM_ROOT="$SDK/comm_libs/13.2/nvshmem"
+export PATH="$SDK/comm_libs/mpi/bin:$SDK/cuda/13.2/bin:$SDK/compilers/bin:$PATH"
+export LD_LIBRARY_PATH="$NVSHMEM_ROOT/lib:$SDK/math_libs/13.2/lib64:$SDK/math_libs/13.2/lib64/cufftmp:$SDK/cuda/13.2/lib64:$SDK/comm_libs/mpi/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+export MULTIMAX_ROOT="$PWD"
+export MUMAXPLUS_FP_PRECISION=SINGLE
+export PYTHONPATH="$MULTIMAX_ROOT/build/src/bindings:$MULTIMAX_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
-Finally, build and install mumax⁺ using pip.
+Repeat the environment setup in each new shell, or save it in your preferred
+shell configuration. Activating `.venv` alone does not configure MPI or the SDK
+shared-library paths. Run the exports from the checkout root so `MULTIMAX_ROOT`
+points at the correct directory.
+
+Check the selected tools and the GPUs:
 
 ```bash
-pip install .
+nvcc --version
+mpicxx --version
+mpirun --version
+nvidia-smi
+nvidia-smi topo -m
+nvidia-smi topo -p2p r
 ```
 
-> [!TIP]
-> If changes are made to the code, then `pip install -v .` can be used to rebuild mumax⁺, with the `-v` flag enabling verbose debug information.
->
-> If you want to change only the Python code, without needing to reinstall after each change, `pip install -ve .` can also be used.
+`nvidia-smi` reports driver CUDA compatibility; `nvcc --version` identifies the
+compiler selected by your environment.
 
-## Check your mumax⁺ installation
+## 5. Build the Python extension
 
-To check if you successfully compiled mumax⁺, we recommend you to run some [examples](README.md#examples) from the `examples/` directory
-or to run the [tests](README.md#testing) in the `test/` directory.
+From the checkout root:
 
-<details><summary><h3>Troubleshooting</h3></summary>
+```bash
+cmake -S . -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CUDA_ARCHITECTURES=native \
+    -DCMAKE_CXX_COMPILER=/usr/bin/g++ \
+    -DCMAKE_CUDA_COMPILER="$SDK/cuda/13.2/bin/nvcc" \
+    -DCUDAToolkit_ROOT="$SDK/cuda/13.2" \
+    -DMPI_CXX_COMPILER="$SDK/comm_libs/mpi/bin/mpicxx" \
+    -DCUFFTMP_ROOT="$SDK/math_libs/13.2" \
+    -DNVSHMEM_ROOT="$NVSHMEM_ROOT" \
+    -DPYBIND11_FINDPYTHON=ON \
+    -DPython_EXECUTABLE="$(command -v python)" \
+    -DFP_PRECISION=SINGLE \
+    -DMUMAX_MODULE_NAME=_mumaxpluscpp_single
 
-* (*Windows*) If you encounter the error `No CUDA toolset found`, try copying the files in `NVIDIA GPU Computing Toolkit/CUDA/<version>/extras/visual_studio_integration/MSBuildExtensions` to `Microsoft Visual Studio/<year>/<edition>/MSBuild/Microsoft/VC/<version>/BuildCustomizations`. See [these instructions](https://github.com/NVlabs/tiny-cuda-nn/issues/164#issuecomment-1280749170) for more details.
+cmake --build build --target _mumaxpluscpp_single --parallel 2
+```
 
-* (*Windows*) If you encounter errors related to interactions between CMake, MSVC and CUDA, like `-- Detecting CUDA compiler ABI info - failed`, you may try the following methods to activate an appropriate set of environment variables. One option is to run the compilation commands in the "Developer Powershell for VS 20XX" that should have been automatically installed alongside MSVC. For CUDA &leq;12.9, another option is to call one of the `.bat` scripts in the folder `& C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build`, such as `vcvars64.bat`, before you run `pip install`.
+`native` targets the GPUs detected during configuration. To target an A100
+explicitly, including when configuring without a GPU, use
+`-DCMAKE_CUDA_ARCHITECTURES=80` instead. Choose the appropriate architecture for
+other supported hardware.
 
-</details>
+This workflow imports the extension directly from the build tree; it does not
+install a wheel into site-packages. Verify the selected backend:
+
+```bash
+python -c 'import mumaxplus; print(mumaxplus._cpp.__file__); print(mumaxplus.FP_PRECISION)'
+```
+
+The path should be under this checkout's `build/src/bindings`, and the precision
+should be `SINGLE`.
+
+After changing C++ or CUDA code, rebuild with:
+
+```bash
+cmake --build build --target _mumaxpluscpp_single --parallel 2
+```
+
+Double precision requires a matching build with `FP_PRECISION=DOUBLE` and module
+name `_mumaxpluscpp_double`, then `MUMAXPLUS_FP_PRECISION=DOUBLE` at runtime.
+Changing the environment variable alone does not build the extension. The
+configuration validated during development uses single precision.
+
+## 6. Run simulations
+
+Normal single-GPU execution:
+
+```bash
+python simulation.py
+```
+
+Experimental two-GPU execution:
+
+```bash
+export CUDA_VISIBLE_DEVICES=0,1
+mpirun --bind-to none -n 2 python simulation.py --multigpu
+```
+
+Current multi-GPU execution assumes one machine, one process per GPU, and the
+same ordered GPU list visible to every rank. Rank 0 selects visible GPU 0,
+rank 1 selects visible GPU 1, and so on. Do not restrict each rank to a different
+one-GPU visibility list with the current mapping.
+
+The `--multigpu` flag is read when `mumaxplus` is imported and applies to worlds
+constructed afterward. A simulation with its own argument parser must accept
+the flag or preserve unknown arguments with `parse_known_args()`.
+
+All ranks must use identical models, initial magnetization, and solver settings,
+and must call collective field evaluations in the same order. Restricting file
+writing to rank 0 is fine; evaluations that trigger collectives must still run
+on every rank.
+
+Current dynamics validation uses fixed timesteps, explicit initial magnetization,
+and zero temperature. Adaptive accept/retry decisions and stochastic state are
+not coordinated across ranks.
+
+Distributed demag requires padded FFT dimensions large enough for the rank
+count: padded `y` and `x` for 2D plans, or padded `z` and `y` for 3D plans.
+The executor validates these dimensions during initialization.
+
+## 7. Check a small simulation
+
+Create `multigpu_check.py` in the checkout root:
+
+```python
+import os
+from pathlib import Path
+
+import numpy as np
+from mumaxplus import Ferromagnet, Grid, World
+
+world = World((2e-9, 2e-9, 2e-9))
+magnet = Ferromagnet(world, Grid((8, 6, 3)))
+magnet.msat = 8e5
+magnet.aex = 13e-12
+magnet.alpha = 0.1
+magnet.temperature = 0
+magnet.magnetization = (1, 0.2, 0.1)
+world.bias_magnetic_field = (-24.6e-3, 4.3e-3, 2e-3)
+
+solver = world.timesolver
+solver.set_method("Fehlberg")
+solver.adaptive_timestep = False
+solver.timestep = 1e-13
+solver.steps(5)
+
+m = magnet.magnetization.eval()
+assert np.isfinite(m).all()
+np.testing.assert_allclose(np.linalg.norm(m, axis=0), 1, rtol=0, atol=1e-5)
+rank = int(os.environ.get("OMPI_COMM_WORLD_RANK", "0"))
+output = Path(os.environ["MULTIMAX_SMOKE_OUTPUT"])
+output.mkdir(parents=True, exist_ok=True)
+np.save(output / f"rank-{rank}.npy", m)
+print(f"rank={rank}: PASS, final time={solver.time:.3e} s", flush=True)
+```
+
+Run the three modes from the checkout root:
+
+```bash
+MULTIMAX_SMOKE_OUTPUT=build/smoke-normal \
+    python multigpu_check.py
+
+MULTIMAX_SMOKE_OUTPUT=build/smoke-mpi1 \
+    mpirun --bind-to none -n 1 python multigpu_check.py --multigpu
+
+MULTIMAX_SMOKE_OUTPUT=build/smoke-mpi2 \
+    mpirun --bind-to none -n 2 python multigpu_check.py --multigpu
+
+python - <<'PY'
+import numpy as np
+reference = np.load('build/smoke-normal/rank-0.npy')
+for mode, ranks in [('mpi1', 1), ('mpi2', 2)]:
+    for rank in range(ranks):
+        result = np.load(f'build/smoke-{mode}/rank-{rank}.npy')
+        np.testing.assert_allclose(result, reference, rtol=5e-5, atol=1e-6)
+print('PASS: normal, one-rank and two-rank final magnetizations agree')
+PY
+```
+
+This checks exchange, demag, and time integration on a small grid. It does not
+replace broader numerical validation or a timestep-convergence study. At this
+guide's update, the latest distributed-exchange and fused-normalization changes
+are awaiting GPU validation.
+
+## Profiling
+
+Enable synchronized per-step checkpoints with:
+
+```bash
+MUMAXPLUS_PROFILE_STEPS=1 python simulation.py
+# Multi-GPU:
+MUMAXPLUS_PROFILE_STEPS=1 mpirun --bind-to none -n 2 python simulation.py --multigpu
+```
+
+Values are milliseconds summed over one timestep, including retries.
+`rhs-inclusive` contains the field and torque measurements beneath it; do not
+add those values together. With fused RK updates, `stage-normalize-assign` and
+`final-normalize-assign` measure the complete weighted update and optional
+normalization, while their separate build counters are zero. Distributed
+`exchange` timing includes MPI gathering.
+
+Set `MUMAXPLUS_PROFILE_STEPS=0`, or leave it unset, for performance measurements.
+Profiling adds GPU synchronization and logging overhead. Multi-GPU speedup is
+workload-dependent, and small simulations can be slower than single-GPU runs.
+
+## Troubleshooting
+
+- **Wrong Python backend:** check `mumaxplus._cpp.__file__` and ensure
+  `PYTHONPATH` names this checkout and its selected build directory.
+- **Missing `mpirun` or shared libraries:** verify the SDK's MPI executable and
+  library paths, NVSHMEM library path, and system packages from step 1.
+- **CMake uses outdated compiler/library paths:** configure a fresh build
+  directory using the complete options above and update `PYTHONPATH` to match.
+- **NVSHMEM symmetric heap is too small:** configure `NVSHMEM_SYMMETRIC_SIZE`
+  before launching MPI. The larger two-A100 development runs used `16G` per
+  rank; choose a value that fits your workload and available GPU memory.
