@@ -17,7 +17,8 @@
 #include "variable.hpp"
 
 RungeKuttaStepper::RungeKuttaStepper(TimeSolver* solver, RKmethod method)
-    : butcher_(ButcherTableau::get(method)) {
+    : butcher_(ButcherTableau::get(method)),
+      finalWeightsGpu_(butcher_.weights1) {
   setParentTimeSolver(solver);
   stageWeightsGpu_.reserve(butcher_.rkMatrix.size());
   for (const auto& weights : butcher_.rkMatrix)
@@ -158,11 +159,8 @@ void RungeKuttaStepper::RungeKuttaStageExecutor::setStageX(int stage) {
 void RungeKuttaStepper::RungeKuttaStageExecutor::setFinalX() {
   StepCheckpoint checkpoint;
   auto& timings = stepTimings();
-  Field xstage = x0;
-  auto dt = stepper.solver_->timestep();
-
-  for (int i = 0; i < stepper.nStages(); i++)
-    addTo(xstage, dt * butcher.weights1[i], k[i]);
+  real dt = stepper.solver_->timestep();
+  Field xstage = addWeighted(x0, k, stepper.finalWeightsGpu_, dt, stepper.nStages());
 
   // If x is a normalized variable, then xstage will be normalized during the
   // assignment. For this reason, we use a temporary xstage field instead of
