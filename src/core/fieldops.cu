@@ -208,30 +208,74 @@ __global__ void k_addFieldsW(CuField out,
                              const CuField* stages,
                              const real* weights,
                              real dt,
-                             int count) {
+                             int count,
+                             bool normalize) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-  // dim guard
-  if (!out.cellInGeometry(idx))
-    return;
+  if (out.ncomp == 3) {
+    real components[3];
 
-  for (int c = 0; c < out.ncomp; c++) {
-    real value = in.valueAt(idx, c);
+    // dim guard
+    if (!out.cellInGeometry(idx))
+      return;
 
-    for (int i = 0; i < count; i++) {
-      real weight = dt * weights[i];
-      value += weight * stages[i].valueAt(idx, c);
+    for (int c = 0; c < out.ncomp; c++) {
+      real value = in.valueAt(idx, c);
+
+      for (int i = 0; i < count; i++) {
+        real weight = dt * weights[i];
+        value += weight * stages[i].valueAt(idx, c);
+      }
+
+      components[c] = value;
+    }
+
+    if (normalize) {
+      real invnorm = rsqrt(components[0]*components[0] + components[1]*components[1] + components[2]*components[2]);
+      components[0] *= invnorm;
+      components[1] *= invnorm;
+      components[2] *= invnorm;
+    }
+
+    out.setVectorInCell(idx, real3{components[0], components[1], components[2]});
+  } else {
+    if (!out.cellInGeometry(idx))
+      return;
+
+    for (int c = 0; c < out.ncomp; c++) {
+      real value = in.valueAt(idx, c);
+
+      for (int i = 0; i < count; i++) {
+        real weight = dt * weights[i];
+        value += weight * stages[i].valueAt(idx, c);
+      }
     }
 
     out.setValueInCell(idx, c, value);
+
+    if (!normalize)
+     return;
+
+    real norm2 = 0.0;
+    for (int c = 0; c < out.ncomp; c++) {
+      real v = out.valueAt(idx, c);
+      norm2 += v * v;
+    }
+    real invnorm = rsqrt(norm2);
+    for (int c = 0; c < out.ncomp; c++) {
+      real value = out.valueAt(idx, c) * invnorm;
+      out.setValueInCell(idx, c, value);
+    }
   }
 }
 
-Field addWeighted(const Field& input,
+void addWeightedInto(const Field& input,
                   const std::vector<Field>& k,
                   const GpuBuffer<real>& weights,
                   real dt,
-                  int count) {
+                  int count,
+                  CuField dest,
+                  bool normalize) {
                     
   if (count < 0 || static_cast<std::size_t>(count) > k.size() ||
       static_cast<std::size_t>(count) > weights.size()) {
@@ -247,12 +291,10 @@ Field addWeighted(const Field& input,
   const CuField* stagesgpu = stagesBuffer.get();
   const real* weightsgpu = weights.get();
 
-  Field output(input.system(), input.ncomp());
-  int ncells = output.grid().ncells();
-  cudaLaunch(ncells, k_addFieldsW, output.cu(), input.cu(), stagesgpu, weightsgpu,
-             dt, count);
+  int ncells = dest.system.grid.ncells();
+  cudaLaunch(ncells, k_addFieldsW, dest, input.cu(), stagesgpu, weightsgpu,
+             dt, count, normalize);
 
-  return output;
 }
 
 Field operator*(real a, const Field& x) {

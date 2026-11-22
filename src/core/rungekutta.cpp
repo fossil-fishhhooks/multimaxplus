@@ -146,13 +146,10 @@ void RungeKuttaStepper::RungeKuttaStageExecutor::setStageX(int stage) {
   StepCheckpoint checkpoint;
   auto& timings = stepTimings();
   real dt = stepper.solver_->timestep();
-  Field xstage = addWeighted(x0, k, stepper.stageWeightsGpu_.at(stage), dt, stage);
+  const bool normalize = dynamic_cast<const NormalizedVariable*>(&x) != nullptr;
+  addWeightedInto(x0, k, stepper.stageWeightsGpu_.at(stage), dt, stage,
+                  x.field().cu(), normalize);
 
-  // If x is a normalized variable, then xstage will be normalized during the
-  // assignment. For this reason, we use a temporary xstage field instead of
-  // working directly on x
-  timings.stageBuild += checkpoint();
-  x = xstage;
   timings.stageAssign += checkpoint();
 }
 
@@ -160,13 +157,9 @@ void RungeKuttaStepper::RungeKuttaStageExecutor::setFinalX() {
   StepCheckpoint checkpoint;
   auto& timings = stepTimings();
   real dt = stepper.solver_->timestep();
-  Field xstage = addWeighted(x0, k, stepper.finalWeightsGpu_, dt, stepper.nStages());
-
-  // If x is a normalized variable, then xstage will be normalized during the
-  // assignment. For this reason, we use a temporary xstage field instead of
-  // working directly on x
-  timings.finalBuild += checkpoint();
-  x = xstage;
+  const bool normalize = dynamic_cast<const NormalizedVariable*>(&x) != nullptr;
+  addWeightedInto(x0, k, stepper.finalWeightsGpu_, dt, stepper.nStages(),
+                  x.field().cu(), normalize);
   timings.finalAssign += checkpoint();
 }
 
