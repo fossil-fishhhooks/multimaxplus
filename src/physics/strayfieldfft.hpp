@@ -3,6 +3,7 @@
 #include <cufftMp.h>
 #include <mpi.h>
 
+#include <array>
 #include <memory>
 #include <cstddef>
 #include <vector>
@@ -58,6 +59,17 @@ class StrayFieldFFTExecutor : public StrayFieldExecutor {
   std::size_t sourcePitch_ = 0;
   std::size_t destinationPitch_ = 0;
   std::size_t localRows_ = 0;
+  // Cached distributed layout and non-owning aliases of descriptor storage.
+  std::array<complex*, 3> localH_{}, localM_{};
+  std::array<complex*, 6> localK_{};
+  std::array<real*, 3> inputReal_{}, outputReal_{};
+  std::vector<int> gatherCounts_, gatherDispls_;
+  std::size_t inputRowStride_ = 0;
+  std::size_t localStorageValues_ = 0;
+  int localSpectrumCells_ = 0;
+  int localOutputCount_ = 0;
+  int firstOutputIdx_ = 0;
+  bool use2DKernel_ = false;
   int3 fftSize;
   std::vector<complex*> kfft, mfft, hfft;
   std::vector<cudaLibXtDesc*> kdesc, mdesc, hdesc;
