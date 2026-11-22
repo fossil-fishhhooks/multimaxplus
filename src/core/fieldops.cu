@@ -201,6 +201,58 @@ Field add(std::vector<const Field*> x, std::vector<real> weights) {
   return y;
 }
 
+
+// merge weighting and adding into one full kernel
+__global__ void k_addFieldsW(CuField out,
+                             const CuField in,
+                             const CuField* stages,
+                             const real* weights,
+                             int count) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  // dim guard
+  if (!out.cellInGeometry(idx))
+    return;
+
+  for (int c = 0; c < out.ncomp; c++) {
+    real value = in.valueAt(idx, c);
+
+    for (int i = 0; i < count; i++) {
+      value += weights[i] * stages[i].valueAt(idx, c);
+    }
+
+    out.setValueInCell(idx, c, value);
+  }
+}
+
+Field addWeighted(const Field& input,
+                  const std::vector<Field>& k,
+                  const std::vector<real>& weights,
+                  int count) {
+                    
+  if (count < 0 || static_cast<std::size_t>(count) > k.size() ||
+      static_cast<std::size_t>(count) > weights.size()) {
+    throw std::invalid_argument("Invalid weighted field count");
+  }
+
+  std::vector<CuField> stages;
+  for (int i = 0; i < count; i++) {
+    stages.push_back(k[i].cu());
+  }
+  GpuBuffer<CuField> stagesBuffer(stages);
+  GpuBuffer<real> weightsBuffer(weights);
+
+  const CuField* stagesgpu = stagesBuffer.get();
+  const real* weightsgpu = weightsBuffer.get();
+
+  Field output(input.system(), input.ncomp());
+  int ncells = output.grid().ncells();
+  cudaLaunch(ncells, k_addFieldsW, output.cu(), input.cu(), stagesgpu, weightsgpu,
+             count);
+
+  return output;
+}
+
 Field operator*(real a, const Field& x) {
   return add(0, x, a, x);
 }

@@ -35,6 +35,12 @@ void addTo(Field& y, const Field& a, const Field& x);
 /// sum_i( weight[i]*x[i] )
 Field add(std::vector<const Field*> x, std::vector<real> weights);
 
+// full kernel for multiple weighted sums in one go
+Field addWeighted(const Field& input,
+                  const std::vector<Field>& k,
+                  const std::vector<real>& weights,
+                  int count);
+
 Field operator*(real a, const Field& x);
 
 Field operator*(real3 a, const Field& x);

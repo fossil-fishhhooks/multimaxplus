@@ -141,10 +141,13 @@ void RungeKuttaStepper::RungeKuttaStageExecutor::setStageX(int stage) {
 
   StepCheckpoint checkpoint;
   auto& timings = stepTimings();
-  Field xstage = x0;
-  auto dt = stepper.solver_->timestep();
-  for (int i = 0; i < stage; i++)
-    addTo(xstage, dt * butcher.rkMatrix[stage][i], k[i]);
+  auto weights = butcher.rkMatrix[stage];  // Copy this stage's weights.
+  real dt = stepper.solver_->timestep();
+
+  for (auto& weight : weights)
+    weight *= dt;
+
+  Field xstage = addWeighted(x0, k, weights, stage);
 
   // If x is a normalized variable, then xstage will be normalized during the
   // assignment. For this reason, we use a temporary xstage field instead of
