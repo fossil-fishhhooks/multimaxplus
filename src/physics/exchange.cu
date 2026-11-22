@@ -13,6 +13,17 @@
 #include "reduce.hpp"
 #include "world.hpp"
 
+#include <algorithm> 
+#include <vector>
+#include <mpi.h>
+#include "session.hpp"
+
+#if FP_PRECISION == SINGLE
+const MPI_Datatype mpiReal = MPI_FLOAT;
+#elif FP_PRECISION == DOUBLE
+const MPI_Datatype mpiReal = MPI_DOUBLE;
+#endif
+
 bool exchangeAssuredZero(const Ferromagnet* magnet) {
   return ((magnet->aex.assuredZero() && magnet->interExch.assuredZero()) ||
           magnet->msat.assuredZero());
@@ -28,8 +39,15 @@ __global__ void k_exchangeField(CuField hField,
                                 bool openBC,
                                 const CuDmiTensor dmiTensor,
                                 const CuInterParameter interEx,
-                                const CuInterParameter scaleEx) {
-  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+                                const CuInterParameter scaleEx,
+                                int firstCell,
+                                int localCells) {
+  int localIdx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (localIdx >= localCells)
+    return;
+
+  int idx = firstCell + localIdx;
   const auto system = hField.system;
 
   // When outside the geometry, set to zero and return early
@@ -105,8 +123,15 @@ __global__ void k_exchangeField(CuField hField,
                                 Grid mastergrid,
                                 const CuDmiTensor dmiTensor,
                                 const CuInterParameter interEx,
-                                const CuInterParameter scaleEx) {
-  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+                                const CuInterParameter scaleEx,
+                                int firstCell,
+                                int localCells) {
+  int localIdx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (localIdx >= localCells)
+    return;
+
+  int idx = firstCell + localIdx;
   const auto system = hField.system;
 
   // When outside the geometry, set to zero and return early
@@ -236,6 +261,21 @@ Field evalEffectiveSublattice(const Ferromagnet* magnet) {
 }
 
 Field evalExchangeField(const Ferromagnet* magnet) {
+  const Session& session = magnet->world()->session();
+  const int3 size = magnet->grid().size();
+  const bool is2D = size.z == 1;
+  const int planes = is2D ? size.y : size.z;
+
+  int base = planes / session.size();
+  int extra = planes % session.size();
+
+  int localPlanes = base + (session.rank() < extra);
+  int firstPlane = session.rank() * base + std::min(session.rank(), extra);
+
+  int valuesPerPlane = is2D ? size.x : size.x * size.y;
+  int firstCell = firstPlane * valuesPerPlane;
+  int localCells = localPlanes * valuesPerPlane;
+
   Field hField(magnet->system(), 3);
 
   if (exchangeAssuredZero(magnet)) {
@@ -261,7 +301,6 @@ Field evalExchangeField(const Ferromagnet* magnet) {
   real3 c = magnet->cellsize();
   real3 w = {1 / (c.x * c.x), 1 / (c.y * c.y), 1 / (c.z * c.z)};
 
-  int ncells = hField.grid().ncells();
   auto mag = magnet->magnetization()->field().cu();
   auto msat = magnet->msat.cu();
   auto aex = magnet->aex.cu();
@@ -271,14 +310,35 @@ Field evalExchangeField(const Ferromagnet* magnet) {
   auto scaleEx = magnet->scaleExch.cu();
 
   if (!magnet->isSublattice() || magnet->enableOpenBC) {
-    cudaLaunch(ncells, k_exchangeField, hField.cu(), mag, aex, msat, w, grid,
-               magnet->enableOpenBC, dmiTensor, interEx, scaleEx);
+    if (localCells > 0)
+      cudaLaunch(localCells, k_exchangeField, hField.cu(), mag, aex, msat, w, grid,
+                 magnet->enableOpenBC, dmiTensor, interEx, scaleEx, firstCell,
+                 localCells);
   } else {
     // In case `magnet` is a sublattice, it's sister sublattice(s) affect(s)
     // the Neumann BC. There are no open boundaries when in this scope.
-    auto sister = evalEffectiveSublattice(magnet);
-    cudaLaunch(ncells, k_exchangeField, hField.cu(), mag, sister.cu(), aex, msat, w,
-               grid, dmiTensor, interEx, scaleEx);
+    if (localCells > 0) {
+      auto sister = evalEffectiveSublattice(magnet);
+      cudaLaunch(localCells, k_exchangeField, hField.cu(), mag, sister.cu(), aex, msat, w,
+                 grid, dmiTensor, interEx, scaleEx, firstCell, localCells);
+    }
+  }
+
+  if (session.multiGpuEnabled()) {
+    std::vector<int> counts(session.size());
+    std::vector<int> displs(session.size());
+    for (int r = 0; r < session.size(); r++) {
+      int localPlanes2 = base + (r < extra);
+      int firstPlane2 = r * base + std::min(r, extra);
+      counts[r] = valuesPerPlane * localPlanes2;
+      displs[r] = valuesPerPlane * firstPlane2;
+    }
+
+    checkCudaError(cudaStreamSynchronize(getCudaStream()));
+    for (int comp = 0; comp < 3; comp++) {
+      MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, hField.device_ptr(comp),
+                     counts.data(), displs.data(), mpiReal, session.communicator());
+    }
   }
   return hField;
 }
