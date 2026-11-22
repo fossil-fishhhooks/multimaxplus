@@ -9,6 +9,7 @@
 #include "stt.hpp"
 #include "timesolver.hpp"
 #include "torque.hpp"
+#include "stepprofile.hpp"
 
 Field evalTorque(const Ferromagnet* magnet) {
   Field torque = evalLlgTorque(magnet);
@@ -48,12 +49,14 @@ __global__ void k_llgtorque(CuField torque,
 Field evalLlgTorque(const Ferromagnet* magnet) {
   Field torque(magnet->system(), 3);
   Field h = evalEffectiveField(magnet);
+  StepCheckpoint checkpoint;
   auto m = magnet->magnetization()->field().cu();
   auto alpha = magnet->alpha.cu();
   auto gamma = magnet->gamma.cu();
   auto frozenSpins = magnet->frozenSpins.cu();
   int ncells = torque.grid().ncells();
   cudaLaunch(ncells, k_llgtorque, torque.cu(), m, h.cu(), alpha, gamma, frozenSpins);
+  stepTimings().llg += checkpoint();
   return torque;
 }
 

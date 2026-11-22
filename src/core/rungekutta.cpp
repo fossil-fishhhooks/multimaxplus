@@ -2,6 +2,8 @@
 
 #include <cmath>
 #include <vector>
+#include <iostream>
+#include <sstream>
 
 #include "butchertableau.hpp"
 #include "datatypes.hpp"
@@ -11,6 +13,7 @@
 #include "fieldquantity.hpp"
 #include "reduce.hpp"
 #include "timesolver.hpp"
+#include "stepprofile.hpp"
 #include "variable.hpp"
 
 RungeKuttaStepper::RungeKuttaStepper(TimeSolver* solver, RKmethod method)
@@ -28,15 +31,21 @@ void RungeKuttaStepper::step() {
     solver_->setTime(solver_->time() + solver_->timestep());
     return;
   }
+  StepTimings timings;
+  StepTimingScope timingScope(timings);
+  StepCheckpoint checkpoint;
+
   // construct a Runge Kutta stage executor for every equation
   std::vector<RungeKuttaStepper::RungeKuttaStageExecutor> equations;
   for (auto eq : solver_->equations())
     equations.emplace_back(eq, *this);
 
+  timings.setup += checkpoint();
   real t0 = solver_->time();
 
   bool success = false;
   while (!success) {
+    ++timings.attempts;
     real dt = solver_->timestep();
 
     // apply the stages
@@ -44,8 +53,10 @@ void RungeKuttaStepper::step() {
       solver_->setTime(t0 + dt * butcher_.nodes[stage]);
       for (auto& eq : equations)
         eq.setStageX(stage);
+      checkpoint(); // Stage construction is measured separately below.
       for (auto& eq : equations)
         eq.setStageK(stage);
+      timings.rhs += checkpoint(); // Inclusive of all field/torque timings.
     }
 
     // make the actual step
@@ -57,12 +68,14 @@ void RungeKuttaStepper::step() {
     if (!solver_->hasAdaptiveTimeStep())
       break;
 
+    checkpoint();
     // loop over equations and get the largest error
     real error = 0.0;
     for (auto& eq : equations)
       if (real e = eq.getError(); e > error)
         error = e;
 
+    timings.error += checkpoint();
     success = error < solver_->maxError();
 
     // update the timestep
@@ -80,6 +93,23 @@ void RungeKuttaStepper::step() {
         eq.resetX();
       solver_->setTime(t0);
     }
+  }
+  if (timingScope.enabled()) {
+    const auto& session = solver_->equations().front().x->system()->world()->session();
+    std::ostringstream line;
+    line << "step-profile rank=" << session.rank()
+         << " t=" << solver_->time() << " attempts=" << timings.attempts
+         << " setup=" << timings.setup
+         << " stage-build=" << timings.stageBuild
+         << " stage-normalize-assign=" << timings.stageAssign
+         << " final-build=" << timings.finalBuild
+         << " final-normalize-assign=" << timings.finalAssign
+         << " rhs-inclusive=" << timings.rhs
+         << " exchange=" << timings.exchange << " demag=" << timings.demag
+         << " external=" << timings.external << " other-fields=" << timings.otherFields
+         << " field-add=" << timings.fieldAdd << " llg=" << timings.llg
+         << " error=" << timings.error << " ms\n";
+    std::cerr << line.str();
   }
 }
 
@@ -109,6 +139,8 @@ void RungeKuttaStepper::RungeKuttaStageExecutor::setStageX(int stage) {
   if (stage == 0)
     return;
 
+  StepCheckpoint checkpoint;
+  auto& timings = stepTimings();
   Field xstage = x0;
   auto dt = stepper.solver_->timestep();
   for (int i = 0; i < stage; i++)
@@ -117,10 +149,14 @@ void RungeKuttaStepper::RungeKuttaStageExecutor::setStageX(int stage) {
   // If x is a normalized variable, then xstage will be normalized during the
   // assignment. For this reason, we use a temporary xstage field instead of
   // working directly on x
+  timings.stageBuild += checkpoint();
   x = xstage;
+  timings.stageAssign += checkpoint();
 }
 
 void RungeKuttaStepper::RungeKuttaStageExecutor::setFinalX() {
+  StepCheckpoint checkpoint;
+  auto& timings = stepTimings();
   Field xstage = x0;
   auto dt = stepper.solver_->timestep();
 
@@ -130,7 +166,9 @@ void RungeKuttaStepper::RungeKuttaStageExecutor::setFinalX() {
   // If x is a normalized variable, then xstage will be normalized during the
   // assignment. For this reason, we use a temporary xstage field instead of
   // working directly on x
+  timings.finalBuild += checkpoint();
   x = xstage;
+  timings.finalAssign += checkpoint();
 }
 
 void RungeKuttaStepper::RungeKuttaStageExecutor::resetX() {

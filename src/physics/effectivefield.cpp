@@ -13,41 +13,81 @@
 #include "local_dmi.hpp"
 #include "magnetoelasticfield.hpp"
 #include "zeeman.hpp"
+#include "stepprofile.hpp"
 
 Field evalEffectiveField(const Ferromagnet* magnet) {
+  StepCheckpoint checkpoint;
+  auto& timings = stepTimings();
   // there will probably be exchange, otherwise safely initialized as 0
   Field h = evalExchangeField(magnet);
+  timings.exchange += checkpoint();
   if (!anisotropyAssuredZero(magnet)) {
-    h += evalAnisotropyField(magnet);
+    checkpoint();
+    Field contribution = evalAnisotropyField(magnet);
+    timings.otherFields += checkpoint();
+    h += contribution;
+    timings.fieldAdd += checkpoint();
   }
   if (!externalFieldAssuredZero(magnet)) {
-    h += evalExternalField(magnet);
+    checkpoint();
+    Field contribution = evalExternalField(magnet);
+    timings.external += checkpoint();
+    h += contribution;
+    timings.fieldAdd += checkpoint();
   }
   if (!inhomoDmiAssuredZero(magnet)) {
-    h += evalDmiField(magnet);
+    checkpoint();
+    Field contribution = evalDmiField(magnet);
+    timings.otherFields += checkpoint();
+    h += contribution;
+    timings.fieldAdd += checkpoint();
   }
   if (!demagFieldAssuredZero(magnet)) {
-    h += evalDemagField(magnet);
+    checkpoint();
+    Field contribution = evalDemagField(magnet);
+    timings.demag += checkpoint();
+    h += contribution;
+    timings.fieldAdd += checkpoint();
   }
   if (!magnetoelasticAssuredZero(magnet)) {
-    h += evalMagnetoelasticField(magnet);
+    checkpoint();
+    Field contribution = evalMagnetoelasticField(magnet);
+    timings.otherFields += checkpoint();
+    h += contribution;
+    timings.fieldAdd += checkpoint();
   }
   if (magnet->isSublattice()) {
     // AFM exchange terms
     if (!inHomoAfmExchangeAssuredZero(magnet)) {
-      h += evalInHomogeneousAfmExchangeField(magnet);
+      checkpoint();
+      Field contribution = evalInHomogeneousAfmExchangeField(magnet);
+      timings.otherFields += checkpoint();
+      h += contribution;
+      timings.fieldAdd += checkpoint();
     }
   }
   if (!homoAfmExchangeAssuredZero(magnet)) {
-    h += evalHomogeneousAfmExchangeField(magnet);
+    checkpoint();
+    Field contribution = evalHomogeneousAfmExchangeField(magnet);
+    timings.otherFields += checkpoint();
+    h += contribution;
+    timings.fieldAdd += checkpoint();
   }
   // Homogeneous (local) DMI term
   if (!homoDmiAssuredZero(magnet)) {
-    h += evalHomoDmiField(magnet);
+    checkpoint();
+    Field contribution = evalHomoDmiField(magnet);
+    timings.otherFields += checkpoint();
+    h += contribution;
+    timings.fieldAdd += checkpoint();
   }
   // ATM anisotropic exchange
   if (!atmExchangeAssuredZero(magnet)) {
-    h += evalAtmExchangeField(magnet);
+    checkpoint();
+    Field contribution = evalAtmExchangeField(magnet);
+    timings.otherFields += checkpoint();
+    h += contribution;
+    timings.fieldAdd += checkpoint();
   }
   return h;
 }
