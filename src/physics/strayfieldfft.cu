@@ -499,16 +499,17 @@ Field StrayFieldFFTExecutor::exec() const {
 
       const int ncells = localSpectrumCells_;
       complex preFactor{-MU0 / kernel_.grid().ncells(), 0};
+      // Multiplication and inverse FFTs use the same stream, preserving order.
       if (ncells > 0) {
       if (use2DKernel_) {
         // if the h field and m field are two dimensional AND are in the same plane
         // (kernel grid origin at z=0) then the kernel matrix has only 4 relevant
         // components and a more efficient cuda kernel can be used:
-        cudaLaunch(ncells, k_apply_kernel_2d, localH_.at(0), localH_.at(1), localH_.at(2),
+        cudaLaunchAsync(ncells, k_apply_kernel_2d, localH_.at(0), localH_.at(1), localH_.at(2),
                    localM_.at(0), localM_.at(1), localM_.at(2), localK_.at(0), localK_.at(1),
                    localK_.at(2), localK_.at(3), preFactor, ncells);
       } else {
-        cudaLaunch(ncells, k_apply_kernel_3d, localH_.at(0), localH_.at(1), localH_.at(2),
+        cudaLaunchAsync(ncells, k_apply_kernel_3d, localH_.at(0), localH_.at(1), localH_.at(2),
                    localM_.at(0), localM_.at(1), localM_.at(2), localK_.at(0), localK_.at(1),
                    localK_.at(2), localK_.at(3), localK_.at(4), localK_.at(5), preFactor, ncells);
       }
