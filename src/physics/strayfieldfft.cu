@@ -141,13 +141,31 @@ __global__ void k_unpad(CuField out, CuField in) {
   unpadCell(out, in, blockIdx.x * blockDim.x + threadIdx.x);
 }
 
-// Extract only output cells whose padded input planes belong to this rank.
-__global__ void k_unpad_local(CuField out, CuField in, int firstOutputIdx,
-                             int outputCount) {
+// Crop directly from this rank's inverse FFT buffers (pitched real rows).
+__global__ void k_unpad_local(CuField out, const real* hx, const real* hy,
+                             const real* hz, int3 paddedSize,
+                             std::size_t firstInputIdx, std::size_t rowStride,
+                             int firstOutputIdx, int outputCount) {
   int localIdx = blockIdx.x * blockDim.x + threadIdx.x;
   if (localIdx >= outputCount)
     return;
-  unpadCell(out, in, firstOutputIdx + localIdx);
+  const int outIdx = firstOutputIdx + localIdx;
+  if (!out.cellInGeometry(outIdx)) {
+    out.setVectorInCell(outIdx, real3{0, 0, 0});
+    return;
+  }
+
+  const Grid outgrid = out.system.grid;
+  const int3 outRelCoo = outgrid.index2coord(outIdx) - outgrid.origin();
+  const int3 inRelCoo = paddedSize - outgrid.size() + outRelCoo;
+  const std::size_t globalIdx =
+      inRelCoo.x + paddedSize.x * (inRelCoo.y + paddedSize.y * inRelCoo.z);
+  const std::size_t slabIdx = globalIdx - firstInputIdx;
+  const std::size_t descriptorIdx =
+      (slabIdx / paddedSize.x) * rowStride + slabIdx % paddedSize.x;
+  out.setValueInCell(outIdx, 0, hx[descriptorIdx]);
+  out.setValueInCell(outIdx, 1, hy[descriptorIdx]);
+  out.setValueInCell(outIdx, 2, hz[descriptorIdx]);
 }
 
 static void checkCufftResult(cufftResult result) {
@@ -388,11 +406,12 @@ Field StrayFieldFFTExecutor::exec() const {
   
   const Session& session = magnet_->world()->session();
 
-  // The full temporary is still used for inverse output. The distributed
-  // forward path writes directly into mdesc, without padding/copying this field.
-  std::shared_ptr<System> kernelSystem =
-      std::make_shared<System>(magnet_->world(), kernel_.grid());
-  std::unique_ptr<Field> mpad(new Field(kernelSystem, 3));
+  // Only the normal cuFFT path needs a full padded temporary field.
+  std::unique_ptr<Field> mpad;
+  if (!session.multiGpuEnabled()) {
+    auto kernelSystem = std::make_shared<System>(magnet_->world(), kernel_.grid());
+    mpad = std::make_unique<Field>(kernelSystem, 3);
+  }
 
   auto padInput = [&](CuField m, CuParameter ms) {
     if (session.multiGpuEnabled()) {
@@ -487,13 +506,6 @@ Field StrayFieldFFTExecutor::exec() const {
         checkCufftResult(cufftXtExecDescriptor(backwardPlan, hdesc.at(comp),
                                                hdesc.at(comp), CUFFT_INVERSE));
 
-        real* dest = mpad->device_ptr(comp) + sourceOffset_;
-        real* src = static_cast<real*>(hdesc.at(comp)->descriptor->data[0]);
-
-        const auto stream = getCudaStream();
-        checkCudaError(cudaMemcpy2DAsync(dest, sourcePitch_, src, destinationPitch_,
-                                         sourcePitch_, localRows_,
-                                         cudaMemcpyDeviceToDevice, stream));
       }
 
 
@@ -528,10 +540,15 @@ Field StrayFieldFFTExecutor::exec() const {
 
       const int localCount = counts.at(session.rank());
       if (localCount > 0) {
-        cudaLaunch(localCount, k_unpad_local, h.cu(), mpad->cu(),
+        cudaLaunch(localCount, k_unpad_local, h.cu(),
+                   static_cast<const real*>(hdesc.at(0)->descriptor->data[0]),
+                   static_cast<const real*>(hdesc.at(1)->descriptor->data[0]),
+                   static_cast<const real*>(hdesc.at(2)->descriptor->data[0]),
+                   size, sourceOffset_, destinationPitch_ / sizeof(real),
                    displs.at(session.rank()), localCount);
       }
-      // Finish the local writes before MPI reads the device buffer.
+      // Also finish inverse work on ranks with no physical output cells.
+      checkCudaError(cudaStreamSynchronize(getCudaStream()));
 
       for (int comp = 0; comp < 3; comp++) {
         int result = MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL,
