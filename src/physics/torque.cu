@@ -1,6 +1,4 @@
 #include <memory>
-#include <cstdlib>
-#include <cstring>
 
 #include "antiferromagnet.hpp"
 #include "anisotropy.hpp"
@@ -30,9 +28,6 @@ Field evalTorque(const Ferromagnet* magnet) {
 namespace {
 // Conservative specialization: all omitted effective-field terms must be zero.
 bool canFuseLlgFields(const Ferromagnet* magnet) {
-  const char* flag = std::getenv("MUMAXPLUS_FUSE_LLG");
-  if (flag && std::strcmp(flag, "0") == 0)
-    return false;
   return !magnet->isSublattice() &&
          anisotropyAssuredZero(magnet) && inhomoDmiAssuredZero(magnet) &&
          magnetoelasticAssuredZero(magnet) &&
