@@ -79,6 +79,37 @@ __global__ void k_pad(CuField out, CuField in, CuParameter msat) {
   }
 }
 
+// Write this rank's spatial slab straight into the in-place FFT buffers.
+// Each row has two extra real slots for even x (one for odd x).
+__global__ void k_pad_local(real* mx, real* my, real* mz, Grid paddedGrid,
+                            CuField in, CuParameter msat,
+                            std::size_t firstInputIdx, std::size_t rowStride,
+                            std::size_t localStorageValues) {
+  std::size_t localIdx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (localIdx >= localStorageValues)
+    return;
+
+  const std::size_t row = localIdx / rowStride;
+  const std::size_t x = localIdx % rowStride;
+  real vx = 0, vy = 0, vz = 0;
+  if (x < paddedGrid.size().x) {
+    const int globalIdx = firstInputIdx + row * paddedGrid.size().x + x;
+    const int3 inCoo = paddedGrid.index2coord(globalIdx) - paddedGrid.origin()
+                      + in.system.grid.origin();
+    if (in.cellInGeometry(inCoo)) {
+      const int inIdx = in.system.grid.coord2index(inCoo);
+      const real Ms = msat.valueAt(inIdx);
+      vx = Ms * in.valueAt(inIdx, 0);
+      vy = Ms * in.valueAt(inIdx, 1);
+      vz = Ms * in.valueAt(inIdx, 2);
+    }
+  }
+  // Also clear the FFT row-padding slots on every evaluation.
+  mx[localIdx] = vx;
+  my[localIdx] = vy;
+  mz[localIdx] = vz;
+}
+
 __device__ void unpadCell(CuField out, CuField in, int outIdx) {
 
   // When outside the geometry of destiny field, set to zero and return
@@ -355,23 +386,35 @@ StrayFieldFFTExecutor::~StrayFieldFFTExecutor() {
 
 Field StrayFieldFFTExecutor::exec() const {
   
-  // pad m, and multiply with msat
+  const Session& session = magnet_->world()->session();
+
+  // The full temporary is still used for inverse output. The distributed
+  // forward path writes directly into mdesc, without padding/copying this field.
   std::shared_ptr<System> kernelSystem =
       std::make_shared<System>(magnet_->world(), kernel_.grid());
   std::unique_ptr<Field> mpad(new Field(kernelSystem, 3));
 
+  auto padInput = [&](CuField m, CuParameter ms) {
+    if (session.multiGpuEnabled()) {
+      const std::size_t rowStride = destinationPitch_ / sizeof(real);
+      const std::size_t storageValues = localRows_ * rowStride;
+      cudaLaunch(storageValues, k_pad_local,
+                 static_cast<real*>(mdesc.at(0)->descriptor->data[0]),
+                 static_cast<real*>(mdesc.at(1)->descriptor->data[0]),
+                 static_cast<real*>(mdesc.at(2)->descriptor->data[0]),
+                 kernel_.grid(), m, ms, sourceOffset_, rowStride, storageValues);
+    } else {
+      cudaLaunch(mpad->grid().ncells(), k_pad, mpad->cu(), m, ms);
+    }
+  };
+
   if (const Ferromagnet* mag = magnet_->asFM()) {
-    auto m = mag->magnetization()->field().cu();
-    auto ms = mag->msat.cu();
-    cudaLaunch(mpad->grid().ncells(), k_pad, mpad->cu(), m, ms);
+    padInput(mag->magnetization()->field().cu(), mag->msat.cu());
   } else {
     auto hostmag = evalHMFullMag(magnet_->asHost());
     auto ms = Parameter(magnet_->system(), 1.0);
-    cudaLaunch(mpad->grid().ncells(), k_pad, mpad->cu(), hostmag.cu(), ms.cu());
+    padInput(hostmag.cu(), ms.cu());
   }
-
-
-  const Session& session = magnet_->world()->session();
 
   if (session.multiGpuEnabled()) {
 
@@ -380,15 +423,6 @@ Field StrayFieldFFTExecutor::exec() const {
       std::vector<complex*> localK(6);
 
       for (int comp = 0; comp < 3; comp++) {
-        real* src = mpad->device_ptr(comp) + sourceOffset_;
-        real* dest =
-            static_cast<real*>(mdesc.at(comp)->descriptor->data[0]);
-
-        const auto stream = getCudaStream();
-        checkCudaError(cudaMemcpy2DAsync(dest, destinationPitch_, src, sourcePitch_,
-                                        sourcePitch_, localRows_, cudaMemcpyDeviceToDevice,
-                                        stream));
-
         mdesc.at(comp)->subFormat = CUFFT_XT_FORMAT_INPLACE;
         checkCufftResult(cufftXtExecDescriptor(
                         forwardPlan,
