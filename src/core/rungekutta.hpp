@@ -19,6 +19,8 @@ class RungeKuttaStepper : public Stepper {
 
  private:
   ButcherTableau butcher_;
+  // Coefficients stay unchanged until a different RK stepper is created.
+  std::vector<GpuBuffer<real>> stageWeightsGpu_;
   class RungeKuttaStageExecutor;
 };
 

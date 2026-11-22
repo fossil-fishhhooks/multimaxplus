@@ -207,6 +207,7 @@ __global__ void k_addFieldsW(CuField out,
                              const CuField in,
                              const CuField* stages,
                              const real* weights,
+                             real dt,
                              int count) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -218,7 +219,8 @@ __global__ void k_addFieldsW(CuField out,
     real value = in.valueAt(idx, c);
 
     for (int i = 0; i < count; i++) {
-      value += weights[i] * stages[i].valueAt(idx, c);
+      real weight = dt * weights[i];
+      value += weight * stages[i].valueAt(idx, c);
     }
 
     out.setValueInCell(idx, c, value);
@@ -227,7 +229,8 @@ __global__ void k_addFieldsW(CuField out,
 
 Field addWeighted(const Field& input,
                   const std::vector<Field>& k,
-                  const std::vector<real>& weights,
+                  const GpuBuffer<real>& weights,
+                  real dt,
                   int count) {
                     
   if (count < 0 || static_cast<std::size_t>(count) > k.size() ||
@@ -240,15 +243,14 @@ Field addWeighted(const Field& input,
     stages.push_back(k[i].cu());
   }
   GpuBuffer<CuField> stagesBuffer(stages);
-  GpuBuffer<real> weightsBuffer(weights);
 
   const CuField* stagesgpu = stagesBuffer.get();
-  const real* weightsgpu = weightsBuffer.get();
+  const real* weightsgpu = weights.get();
 
   Field output(input.system(), input.ncomp());
   int ncells = output.grid().ncells();
   cudaLaunch(ncells, k_addFieldsW, output.cu(), input.cu(), stagesgpu, weightsgpu,
-             count);
+             dt, count);
 
   return output;
 }

@@ -35,10 +35,11 @@ void addTo(Field& y, const Field& a, const Field& x);
 /// sum_i( weight[i]*x[i] )
 Field add(std::vector<const Field*> x, std::vector<real> weights);
 
-// full kernel for multiple weighted sums in one go
+// input + sum_i(dt * weights[i] * k[i]); weights already reside on the GPU.
 Field addWeighted(const Field& input,
                   const std::vector<Field>& k,
-                  const std::vector<real>& weights,
+                  const GpuBuffer<real>& weights,
+                  real dt,
                   int count);
 
 Field operator*(real a, const Field& x);
