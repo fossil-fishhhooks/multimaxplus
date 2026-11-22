@@ -249,9 +249,8 @@ __global__ void k_addFieldsW(CuField out,
         real weight = dt * weights[i];
         value += weight * stages[i].valueAt(idx, c);
       }
+      out.setValueInCell(idx, c, value);
     }
-
-    out.setValueInCell(idx, c, value);
 
     if (!normalize)
      return;
