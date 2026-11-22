@@ -1,6 +1,18 @@
 <!-- markdownlint-disable MD028 MD033 MD034 -->
+# multimaxplus
 
-# mumax⁺
+Multimaxplus is a fork of [mumax⁺](https://github.com/mumax/plus) designed for high performance micromagnetics simulations. It extends mumax⁺'s GPU-acceleration capability to systems with multiple server class GPUs, splitting loads between them for faster large simulations. Multimaxplus also includes a minor performance increase even on single-GPU systems.
+
+## Details
+It distributes demagnetizing-field FFTs across GPUs using NVIDIA cuFFTMp
+and includes Runge–Kutta solver optimizations that reduce repeated GPU
+memory operations. Performance depends on simulation size and configuration;
+small simulations may run faster on one GPU.
+
+The implementation currently targets multiple GPUs on a single Linux server.
+Single-GPU execution remains the default.
+
+## Original mumax⁺
 
 A versatile and extensible GPU-accelerated micromagnetic simulator written in C++ and CUDA with a Python interface. This project is in development alongside [mumax³](https://github.com/mumax/3).
 If you have any questions, feel free to use the [mumax⁺ GitHub Discussions](https://github.com/mumax/plus/discussions).
@@ -19,11 +31,14 @@ All demonstrations in the paper were simulated using version [v1.1.0](https://gi
 
 ## Installation
 
-See [INSTALL.md](INSTALL.md) or the [mumax⁺ website](https://mumax.github.io/plus/install.html) for full instructions, covering the 3 main ways you can run/install mumax⁺:
+This fork currently requires building from source on Linux with matching
+CUDA, cuFFTMp, NVSHMEM, and CUDA-aware Open MPI installations. These build
+dependencies are required even when running in single-GPU mode.
 
-- online through [Google Colab](https://colab.research.google.com/github/mumax/plus/blob/master/examples/colab.ipynb),
-- installing pre-built wheels from the [GitHub releases](https://github.com/mumax/plus/releases/latest),
-- building from source.
+See [INSTALL.md](INSTALL.md) for fork-specific instructions.
+
+Upstream mumax⁺ wheels and Google Colab examples do not include the
+multigpu changes in this repository.
 
 ## Documentation
 
