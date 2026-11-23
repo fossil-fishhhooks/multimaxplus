@@ -22,6 +22,7 @@
 #include "strayfieldfft.hpp"
 #include "strayfieldkernel.hpp"
 #include "system.hpp"
+#include "stepprofile.hpp"
 
 #if FP_PRECISION == SINGLE
 const cufftType FFT = CUFFT_R2C;
@@ -457,6 +458,8 @@ StrayFieldFFTExecutor::~StrayFieldFFTExecutor() {
 }
 
 Field StrayFieldFFTExecutor::exec() const {
+  StepCheckpoint checkpoint;
+  auto& timings = stepTimings();
   
   const Session& session = magnet_->world()->session();
 
@@ -466,6 +469,8 @@ Field StrayFieldFFTExecutor::exec() const {
     auto kernelSystem = std::make_shared<System>(magnet_->world(), kernel_.grid());
     mpad = std::make_unique<Field>(kernelSystem, 3);
   }
+
+  timings.demagSetup += checkpoint();
 
   auto padInput = [&](CuField m, CuParameter ms) {
     if (session.multiGpuEnabled()) {
@@ -485,6 +490,7 @@ Field StrayFieldFFTExecutor::exec() const {
     auto ms = Parameter(magnet_->system(), 1.0);
     padInput(hostmag.cu(), ms.cu());
   }
+  timings.demagPad += checkpoint();
 
   if (session.multiGpuEnabled()) {
 
@@ -496,6 +502,8 @@ Field StrayFieldFFTExecutor::exec() const {
                         mdesc.at(comp),
                         CUFFT_FORWARD));
       }
+
+      timings.demagForward += checkpoint();
 
       const int ncells = localSpectrumCells_;
       complex preFactor{-MU0 / kernel_.grid().ncells(), 0};
@@ -516,6 +524,8 @@ Field StrayFieldFFTExecutor::exec() const {
       }
 
 
+      timings.demagMultiply += checkpoint();
+
       for (int comp = 0; comp < 3; comp++) {
         hdesc.at(comp)->subFormat = CUFFT_XT_FORMAT_INPLACE_SHUFFLED;
         checkCufftResult(cufftXtExecDescriptor(backwardPlan, hdesc.at(comp),
@@ -524,9 +534,12 @@ Field StrayFieldFFTExecutor::exec() const {
       }
 
 
+      timings.demagInverse += checkpoint();
+
       // Crop locally, then assemble only the physical output on every rank.
       // k_unpad selects the last outputSize cells along each padded axis.
       Field h(system_, 3);
+      timings.demagSetup += checkpoint();
       if (localOutputCount_ > 0) {
         cudaLaunch(localOutputCount_, k_unpad_local, h.cu(),
                    static_cast<const real*>(outputReal_.at(0)),
@@ -537,6 +550,7 @@ Field StrayFieldFFTExecutor::exec() const {
       }
       // Also finish inverse work on ranks with no physical output cells.
       checkCudaError(cudaStreamSynchronize(getCudaStream()));
+      timings.demagCrop += checkpoint();
 
       for (int comp = 0; comp < 3; comp++) {
         int result = MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL,
@@ -546,12 +560,14 @@ Field StrayFieldFFTExecutor::exec() const {
           session.abort(result);
         }
       }
+      timings.demagGather += checkpoint();
       return h;
   } else {
 
     // Forward fourier transforms
     for (int comp = 0; comp < 3; comp++)
       checkCufftResult(fftExec(forwardPlan, mpad->device_ptr(comp), mfft.at(comp)));
+    timings.demagForward += checkpoint();
 
     // apply kernel on m_fft
     int ncells = fftSize.x * fftSize.y * fftSize.z;
@@ -570,14 +586,19 @@ Field StrayFieldFFTExecutor::exec() const {
     }
 
 
+    timings.demagMultiply += checkpoint();
+
     // backward fourier transfrom
     for (int comp = 0; comp < 3; comp++)
       checkCufftResult(ifftExec(backwardPlan, hfft.at(comp), mpad->device_ptr(comp)));
+    timings.demagInverse += checkpoint();
 
 
     // unpad
     Field h(system_, 3);
+    timings.demagSetup += checkpoint();
     cudaLaunch(h.grid().ncells(), k_unpad, h.cu(), mpad->cu());
+    timings.demagCrop += checkpoint();
     return h;
   }
 }

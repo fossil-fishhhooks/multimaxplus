@@ -110,6 +110,11 @@ void RungeKuttaStepper::step() {
          << " final-normalize-assign=" << timings.finalAssign
          << " rhs-inclusive=" << timings.rhs
          << " exchange=" << timings.exchange << " demag=" << timings.demag
+         << " demag-setup=" << timings.demagSetup << " demag-pad=" << timings.demagPad
+         << " demag-forward=" << timings.demagForward
+         << " demag-multiply=" << timings.demagMultiply
+         << " demag-inverse=" << timings.demagInverse
+         << " demag-crop=" << timings.demagCrop << " demag-gather=" << timings.demagGather
          << " external=" << timings.external << " other-fields=" << timings.otherFields
          << " field-add=" << timings.fieldAdd << " llg=" << timings.llg
          << " error=" << timings.error << " ms\n";

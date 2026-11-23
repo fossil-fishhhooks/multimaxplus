@@ -12,6 +12,9 @@ struct StepTimings {
   double finalBuild = 0, finalAssign = 0, rhs = 0, error = 0;
   double exchange = 0, demag = 0, external = 0, otherFields = 0;
   double fieldAdd = 0, llg = 0;
+  // Demag substages are included in the outer demag total, not additional work.
+  double demagSetup = 0, demagPad = 0, demagForward = 0, demagMultiply = 0;
+  double demagInverse = 0, demagCrop = 0, demagGather = 0;
   int attempts = 0;
 };
 
