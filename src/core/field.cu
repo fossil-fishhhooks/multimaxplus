@@ -84,7 +84,11 @@ void Field::allocate() {
   if (empty())
     return;
 
-  buffers_ = std::vector<GpuBuffer<real>>(ncomp_, GpuBuffer<real>(grid().ncells()));
+  // Construct each component independently; a fill constructor would copy
+  // an uninitialized prototype GPU buffer once per component.
+  buffers_.reserve(ncomp_);
+  for (int comp = 0; comp < ncomp_; comp++)
+    buffers_.emplace_back(grid().ncells());
 
   updateDevicePointersBuffer();
 }
