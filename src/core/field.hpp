@@ -102,7 +102,11 @@ struct CuField {
   real* inlinePtrs[3] = {nullptr, nullptr, nullptr};
 
   __device__ real* componentPtr(int comp) const {
-    return ncomp <= 3 ? inlinePtrs[comp] : ptrs[comp];
+    if (ncomp > 3) return ptrs[comp];
+    // Fixed indices avoid copying the kernel argument into thread-local memory.
+    if (comp == 0) return inlinePtrs[0];
+    if (comp == 1) return inlinePtrs[1];
+    return inlinePtrs[2];
   }
 
  public:
