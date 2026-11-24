@@ -72,6 +72,11 @@ std::shared_ptr<const System> Field::system() const {
 }
 
 void Field::updateDevicePointersBuffer() {
+  // Small fields carry their component addresses directly in CuField.
+  if (ncomp_ <= 3) {
+    bufferPtrs_.recycle();
+    return;
+  }
   std::vector<real*> bufferPtrsOnHost(ncomp_);
   std::transform(buffers_.begin(), buffers_.end(), bufferPtrsOnHost.begin(),
                  [](auto& buf) { return buf.get(); });

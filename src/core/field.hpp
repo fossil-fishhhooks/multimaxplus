@@ -99,10 +99,18 @@ struct CuField {
 
  private:
   real** ptrs;
+  real* inlinePtrs[3] = {nullptr, nullptr, nullptr};
+
+  __device__ real* componentPtr(int comp) const {
+    return ncomp <= 3 ? inlinePtrs[comp] : ptrs[comp];
+  }
 
  public:
   explicit CuField(const Field* f)
-      : system(f->system()->cu()), ncomp(f->ncomp()), ptrs(f->bufferPtrs_.get()) {}
+      : system(f->system()->cu()), ncomp(f->ncomp()), ptrs(f->bufferPtrs_.get()) {
+    if (ncomp <= 3)
+      for (int c = 0; c < ncomp; ++c) inlinePtrs[c] = f->device_ptr(c);
+  }
 
   __device__ bool cellInGrid(int) const;
   __device__ bool cellInGrid(int3) const;
@@ -151,7 +159,7 @@ __device__ inline bool CuField::cellInRegion(unsigned int region_idx, int3 coo) 
 }
 
 __device__ inline real CuField::valueAt(int idx, int comp) const {
-  return ptrs[comp][idx];
+  return componentPtr(comp)[idx];
 }
 
 __device__ inline real CuField::valueAt(int3 coo, int comp) const {
@@ -159,7 +167,7 @@ __device__ inline real CuField::valueAt(int3 coo, int comp) const {
 }
 
 __device__ inline real3 CuField::vectorAt(int idx) const {
-  return real3{ptrs[0][idx], ptrs[1][idx], ptrs[2][idx]};
+  return real3{valueAt(idx, 0), valueAt(idx, 1), valueAt(idx, 2)};
 }
 
 __device__ inline real3 CuField::vectorAt(int3 coo) const {
@@ -167,7 +175,7 @@ __device__ inline real3 CuField::vectorAt(int3 coo) const {
 }
 
 __device__ inline real3 CuField::vectorAt(int idx, int3 comps) const {
-  return real3{ptrs[comps.x][idx], ptrs[comps.y][idx], ptrs[comps.z][idx]};
+  return real3{valueAt(idx, comps.x), valueAt(idx, comps.y), valueAt(idx, comps.z)};
 }
 
 __device__ inline real3 CuField::vectorAt(int3 coo, int3 comps) const {
@@ -175,11 +183,11 @@ __device__ inline real3 CuField::vectorAt(int3 coo, int3 comps) const {
 }
 
 __device__ inline void CuField::setValueInCell(int idx, int comp, real value) {
-  ptrs[comp][idx] = value;
+  componentPtr(comp)[idx] = value;
 }
 
 __device__ inline void CuField::setVectorInCell(int idx, real3 vec) {
-  ptrs[0][idx] = vec.x;
-  ptrs[1][idx] = vec.y;
-  ptrs[2][idx] = vec.z;
+  setValueInCell(idx, 0, vec.x);
+  setValueInCell(idx, 1, vec.y);
+  setValueInCell(idx, 2, vec.z);
 }
