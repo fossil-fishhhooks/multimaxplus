@@ -8,6 +8,9 @@
 #include <stdexcept>
 #include <algorithm>
 #include <vector>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
 
 
 #include "constants.hpp"
@@ -15,6 +18,7 @@
 #include "field.hpp"
 #include "fieldops.hpp"
 #include "fullmag.hpp"
+#include "gpubuffer.hpp"
 #include "grid.hpp"
 #include "magnet.hpp"
 #include "parameter.hpp"
@@ -29,12 +33,16 @@ const cufftType FFT = CUFFT_R2C;
 const cufftType IFFT = CUFFT_C2R;
 const auto& fftExec = cufftExecR2C;
 const auto& ifftExec = cufftExecC2R;
+const cufftType CFFT = CUFFT_C2C;
+const auto& cfftExec = cufftExecC2C;
 const MPI_Datatype mpiReal = MPI_FLOAT;
 #elif FP_PRECISION == DOUBLE
 const cufftType FFT = CUFFT_D2Z;
 const cufftType IFFT = CUFFT_Z2D;
 const auto& fftExec = cufftExecD2Z;
 const auto& ifftExec = cufftExecZ2D;
+const cufftType CFFT = CUFFT_Z2Z;
+const auto& cfftExec = cufftExecZ2Z;
 const MPI_Datatype mpiReal = MPI_DOUBLE;
 #endif
 
@@ -221,6 +229,175 @@ __global__ void k_apply_kernel_2d(complex* hx,
   hy[i] = prod(preFactor, (sum(prod(kxy[i], mx[i]), prod(kyy[i], my[i]))));
   hz[i] = prod(preFactor, prod(kzz[i], mz[i]));
 }
+
+namespace {
+
+// These are ordinary single-GPU cuFFT plans: no MPI communicator is attached.
+// Unlike distributed cuFFTMp plans, they support batched 1D transforms.
+struct LocalFFTPlan {
+  cufftHandle handle = 0;
+  LocalFFTPlan() { checkCufftResult(cufftCreate(&handle)); }
+  ~LocalFFTPlan() { if (handle) cufftDestroy(handle); }
+  LocalFFTPlan(const LocalFFTPlan&) = delete;
+  LocalFFTPlan& operator=(const LocalFFTPlan&) = delete;
+  operator cufftHandle() const { return handle; }
+};
+
+// Only physical y/z rows are present. Each x row still has the full padded
+// transform length and the two real storage slots required by in-place R2C.
+__global__ void k_pad_pruned(real* rows, CuField m, CuParameter msat,
+                             int3 physical, int firstZ, int rowStride,
+                             int componentValues) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= componentValues) return;
+  const int x = i % rowStride;
+  const int row = i / rowStride;
+  real values[3] = {0, 0, 0};
+  if (x < physical.x) {
+    const int cell = (firstZ * physical.y + row) * physical.x + x;
+    if (m.cellInGeometry(cell)) {
+      const real ms = msat.valueAt(cell);
+      for (int c = 0; c < 3; ++c) values[c] = ms * m.valueAt(cell, c);
+    }
+  }
+  for (int c = 0; c < 3; ++c) rows[c * componentValues + i] = values[c];
+}
+
+// Batched matrix transpose. Missing source rows become zeros; columnOffset
+// selects the wanted y output on the inverse. Tiling coalesces both sides.
+__global__ void k_transpose_pruned(complex* dst, const complex* src,
+                                   int rows, int cols, int sourceRows,
+                                   int sourceStride, int columnOffset) {
+  __shared__ complex tile[32][33];
+  int x = blockIdx.x * 32 + threadIdx.x;
+  int y = blockIdx.y * 32 + threadIdx.y;
+  const size_t sourceBase = size_t(blockIdx.z) * sourceRows * sourceStride;
+  for (int j = 0; j < 32; j += 8) {
+    if (x < cols && y + j < rows) {
+      tile[threadIdx.y + j][threadIdx.x] = y + j < sourceRows
+          ? src[sourceBase + size_t(y + j) * sourceStride + columnOffset + x]
+          : complex{0, 0};
+    }
+  }
+  __syncthreads();
+  x = blockIdx.y * 32 + threadIdx.x;
+  y = blockIdx.x * 32 + threadIdx.y;
+  const size_t destinationBase = size_t(blockIdx.z) * rows * cols;
+  for (int j = 0; j < 32; j += 8) {
+    if (x < rows && y + j < cols)
+      dst[destinationBase + size_t(y + j) * rows + x] =
+          tile[threadIdx.x][threadIdx.y + j];
+  }
+}
+
+void transposePruned(complex* dst, const complex* src, int rows, int cols,
+                     int sourceRows, int sourceStride, int columnOffset,
+                     int batches = 1) {
+  k_transpose_pruned<<<dim3((cols + 31) / 32, (rows + 31) / 32, batches),
+                       dim3(32, 8), 0, getCudaStream()>>>(
+      dst, src, rows, cols, sourceRows, sourceStride, columnOffset);
+  checkCudaError(cudaPeekAtLastError());
+}
+
+// Received messages are [source-rank][local-ky][component][local-z][kx].
+// Expand only here to the existing [z][local-ky][kx] spectral layout, clearing
+// the missing z planes on EVERY evaluation because the z FFT overwrites them.
+__global__ void k_unpack_pruned_z(complex* m0, complex* m1, complex* m2,
+                                  const complex* received, int nxComplex,
+                                  int localY, int localZ, int physicalZ,
+                                  int spectrumCells) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= spectrumCells) return;
+  const int x = i % nxComplex;
+  const int y = (i / nxComplex) % localY;
+  const int z = i / (nxComplex * localY);
+  complex* outputs[3] = {m0, m1, m2};
+  for (int c = 0; c < 3; ++c) {
+    complex value{0, 0};
+    if (z < physicalZ) {
+      const size_t source =
+          (((size_t(z / localZ) * localY + y) * 3 + c) * localZ
+           + z % localZ) * nxComplex + x;
+      value = received[source];
+    }
+    outputs[c][i] = value;
+  }
+}
+
+// After inverse z, send only the last physicalZ planes. Message order is
+// [destination-rank][local-ky][component][local-output-z][kx].
+__global__ void k_pack_pruned_z(complex* send, const complex* h0,
+                                const complex* h1, const complex* h2,
+                                int nxComplex, int localY, int localZ,
+                                int cropZ, int count) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= count) return;
+  int q = i / nxComplex;
+  const int x = i % nxComplex;
+  const int z = q % localZ; q /= localZ;
+  const int c = q % 3; q /= 3;
+  const int y = q % localY;
+  const int destination = q / localY;
+  const complex* inputs[3] = {h0, h1, h2};
+  send[i] = inputs[c][
+      (size_t(cropZ + destination * localZ + z) * localY + y)
+      * nxComplex + x];
+}
+
+__global__ void k_unpad_pruned(CuField out, const real* rows,
+                               int physicalX, int firstCell, int rowStride,
+                               int cropX, int componentValues, int count) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= count) return;
+  const int cell = firstCell + i;
+  const int source = (i / physicalX) * rowStride + cropX + i % physicalX;
+  const bool inside = out.cellInGeometry(cell);
+  for (int c = 0; c < 3; ++c)
+    out.setValueInCell(cell, c, inside ? rows[c * componentValues + source] : 0);
+}
+
+} // namespace
+
+// Balanced physical-z slabs before/after the transform, and the same ky slabs
+// as cuFFTMp between them. Tensor spectra and multiplication are unchanged.
+struct StrayFieldFFTExecutor::PrunedFFT {
+  int3 physical, padded;
+  int localZ, localY, nxComplex, rowStride, firstCell;
+  int componentValues, localCells, pencilRows, messageValues;
+  GpuBuffer<real> xRows;
+  GpuBuffer<complex> yRows, send, received;
+  LocalFFTPlan xForward, xBackward, yPlan, zPlan;
+
+  PrunedFFT(int3 physical, int3 padded, int rank, int processes)
+      : physical(physical), padded(padded), localZ(physical.z / processes),
+        localY(padded.y / processes), nxComplex(padded.x / 2 + 1),
+        rowStride(2 * nxComplex),
+        firstCell(rank * localZ * physical.y * physical.x),
+        componentValues(localZ * physical.y * rowStride),
+        localCells(localZ * physical.y * physical.x),
+        pencilRows(3 * localZ * nxComplex),
+        messageValues(2 * localY * pencilRows),
+        xRows(size_t(3) * componentValues),
+        yRows(size_t(pencilRows) * padded.y),
+        send(yRows.size()), received(yRows.size()) {
+    size_t worksize;
+    int nx[] = {padded.x}, realEmbed[] = {rowStride}, complexEmbed[] = {nxComplex};
+    const int xBatch = 3 * localZ * physical.y;
+    checkCufftResult(cufftMakePlanMany(xForward, 1, nx,
+        realEmbed, 1, rowStride, complexEmbed, 1, nxComplex, FFT, xBatch, &worksize));
+    checkCufftResult(cufftMakePlanMany(xBackward, 1, nx,
+        complexEmbed, 1, nxComplex, realEmbed, 1, rowStride, IFFT, xBatch, &worksize));
+    int ny[] = {padded.y};
+    checkCufftResult(cufftMakePlanMany(yPlan, 1, ny,
+        ny, 1, padded.y, ny, 1, padded.y, CFFT, pencilRows, &worksize));
+    int nz[] = {padded.z};
+    const int plane = localY * nxComplex;
+    checkCufftResult(cufftMakePlanMany(zPlan, 1, nz,
+        nz, plane, 1, nz, plane, 1, CFFT, plane, &worksize));
+    for (cufftHandle plan : {xForward.handle, xBackward.handle, yPlan.handle, zPlan.handle})
+      checkCufftResult(cufftSetStream(plan, getCudaStream()));
+  }
+};
 
 StrayFieldFFTExecutor::StrayFieldFFTExecutor(const Magnet* magnet,
                                              std::shared_ptr<const System> system,
@@ -409,6 +586,30 @@ StrayFieldFFTExecutor::StrayFieldFFTExecutor(const Magnet* magnet,
       firstOutputIdx_ = gatherDispls_.at(session.rank());
     }
 
+    // First version: matching 3D grids, doubled padding, and balanced slabs.
+    // Keep the general path for thin films, small odd grids, or uneven splits.
+    const int3 physical = system_->grid().size();
+    const char* pruneFlag = std::getenv("MUMAXPLUS_PRUNE_DEMAG");
+    if ((!pruneFlag || std::strcmp(pruneFlag, "0") != 0) && processes > 1 &&
+        magnet_->grid() == system_->grid() &&
+        size.x == 2 * physical.x && size.y == 2 * physical.y &&
+        size.z == 2 * physical.z && physical.z % processes == 0 &&
+        size.y % processes == 0) {
+      const size_t z = physical.z / processes;
+      const size_t y = size.y / processes;
+      const size_t x = fftSize.x;
+      const size_t xValues = z * physical.y * 2 * x;
+      const size_t exchanged = 3 * z * x * size.y;
+      const size_t limit = std::numeric_limits<int>::max();
+      if (3 * xValues <= limit && exchanged <= limit &&
+          2 * exchanged / processes <= limit &&
+          size_t(size.z) * y * x <= limit &&
+          3 * z <= 65535 && 3 * z * x <= 32 * 65535 &&
+          size.y <= 32 * 65535 && x <= 32 * 65535) {
+        pruned_ = std::make_unique<PrunedFFT>(physical, size, session.rank(), processes);
+      }
+    }
+
   } else {
 
 
@@ -432,6 +633,8 @@ StrayFieldFFTExecutor::StrayFieldFFTExecutor(const Magnet* magnet,
 }
 
 StrayFieldFFTExecutor::~StrayFieldFFTExecutor() {
+  // Finish owning the local plans/buffers before releasing cuFFTMp resources.
+  pruned_.reset();
   const Session& session = magnet_->world()->session();
   if(session.multiGpuEnabled()){
     for (auto desc : mdesc)
@@ -457,7 +660,104 @@ StrayFieldFFTExecutor::~StrayFieldFFTExecutor() {
   }
 }
 
+Field StrayFieldFFTExecutor::execPruned() const {
+  auto& p = *pruned_;
+  const auto& session = magnet_->world()->session();
+  StepCheckpoint checkpoint;
+  auto& timings = stepTimings();
+
+  auto pad = [&](CuField m, CuParameter ms) {
+    cudaLaunchAsync(p.componentValues, k_pad_pruned, p.xRows.get(), m, ms,
+                    p.physical, session.rank() * p.localZ, p.rowStride,
+                    p.componentValues);
+  };
+  if (const Ferromagnet* mag = magnet_->asFM()) {
+    pad(mag->magnetization()->field().cu(), mag->msat.cu());
+  } else {
+    auto m = evalHMFullMag(magnet_->asHost());
+    auto ms = Parameter(magnet_->system(), 1.0);
+    pad(m.cu(), ms.cu());
+    // These temporary fields must survive until the pad has consumed them.
+    checkCudaError(cudaStreamSynchronize(getCudaStream()));
+  }
+  timings.demagPad += checkpoint();
+
+  // 1. x FFTs on physical y/z rows, then y FFTs on physical z planes.
+  auto xComplex = reinterpret_cast<complex*>(p.xRows.get());
+  checkCufftResult(fftExec(p.xForward, p.xRows.get(), xComplex));
+  transposePruned(p.yRows.get(), xComplex, p.padded.y, p.nxComplex,
+                  p.physical.y, p.nxComplex, 0, 3 * p.localZ);
+  checkCufftResult(cfftExec(p.yPlan, p.yRows.get(), p.yRows.get(), CUFFT_FORWARD));
+
+  // 2. Pack by destination ky slab. Only physical z planes travel in MPI.
+  transposePruned(p.send.get(), p.yRows.get(), p.pencilRows, p.padded.y,
+                  p.pencilRows, p.padded.y, 0);
+  auto exchange = [&]() {
+    checkCudaError(cudaStreamSynchronize(getCudaStream()));
+    const int result = MPI_Alltoall(p.send.get(), p.messageValues, mpiReal,
+        p.received.get(), p.messageValues, mpiReal, session.communicator());
+    if (result != MPI_SUCCESS) session.abort(result);
+  };
+  exchange();
+  cudaLaunchAsync(localSpectrumCells_, k_unpack_pruned_z,
+                  localM_[0], localM_[1], localM_[2],
+                  static_cast<const complex*>(p.received.get()),
+                  p.nxComplex, p.localY, p.localZ, p.physical.z,
+                  localSpectrumCells_);
+
+  // 3. Complete z FFTs in the existing ky-slab layout used by kernel spectra.
+  for (int c = 0; c < 3; ++c)
+    checkCufftResult(cfftExec(p.zPlan, localM_[c], localM_[c], CUFFT_FORWARD));
+  timings.demagForward += checkpoint();
+
+  complex preFactor{-MU0 / kernel_.grid().ncells(), 0};
+  cudaLaunchAsync(localSpectrumCells_, k_apply_kernel_3d,
+      localH_[0], localH_[1], localH_[2], localM_[0], localM_[1], localM_[2],
+      localK_[0], localK_[1], localK_[2], localK_[3], localK_[4], localK_[5],
+      preFactor, localSpectrumCells_);
+  timings.demagMultiply += checkpoint();
+
+  // 4. Inverse z, then exchange only the planes that survive the z crop.
+  for (int c = 0; c < 3; ++c)
+    checkCufftResult(cfftExec(p.zPlan, localH_[c], localH_[c], CUFFT_INVERSE));
+  cudaLaunchAsync(int(p.send.size()), k_pack_pruned_z,
+                  p.send.get(), static_cast<const complex*>(localH_[0]),
+                  static_cast<const complex*>(localH_[1]),
+                  static_cast<const complex*>(localH_[2]),
+                  p.nxComplex, p.localY, p.localZ, p.padded.z - p.physical.z,
+                  int(p.send.size()));
+  exchange();
+  transposePruned(p.yRows.get(), p.received.get(), p.padded.y, p.pencilRows,
+                  p.padded.y, p.pencilRows, 0);
+
+  // 5. Inverse y on wanted z planes, inverse x on wanted y/z rows only.
+  checkCufftResult(cfftExec(p.yPlan, p.yRows.get(), p.yRows.get(), CUFFT_INVERSE));
+  transposePruned(xComplex, p.yRows.get(), p.nxComplex, p.physical.y,
+                  p.nxComplex, p.padded.y, p.padded.y - p.physical.y,
+                  3 * p.localZ);
+  checkCufftResult(ifftExec(p.xBackward, xComplex, p.xRows.get()));
+  timings.demagInverse += checkpoint();
+
+  Field h(system_, 3);
+  timings.demagSetup += checkpoint();
+  cudaLaunchAsync(p.localCells, k_unpad_pruned, h.cu(),
+                  static_cast<const real*>(p.xRows.get()),
+                  p.physical.x, p.firstCell, p.rowStride,
+                  p.padded.x - p.physical.x, p.componentValues, p.localCells);
+  checkCudaError(cudaStreamSynchronize(getCudaStream()));
+  timings.demagCrop += checkpoint();
+  // The rest of the solver still expects a complete physical field per rank.
+  for (int c = 0; c < 3; ++c) {
+    const int result = MPI_Allgather(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL,
+        h.device_ptr(c), p.localCells, mpiReal, session.communicator());
+    if (result != MPI_SUCCESS) session.abort(result);
+  }
+  timings.demagGather += checkpoint();
+  return h;
+}
+
 Field StrayFieldFFTExecutor::exec() const {
+  if (pruned_) return execPruned();
   StepCheckpoint checkpoint;
   auto& timings = stepTimings();
   

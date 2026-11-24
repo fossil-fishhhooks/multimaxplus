@@ -54,6 +54,10 @@ class StrayFieldFFTExecutor : public StrayFieldExecutor {
   const StrayFieldKernel& kernel() const { return kernel_; }
 
  private:
+  // Optional row-pruned pipeline; the general cuFFTMp path remains available.
+  struct PrunedFFT;
+  std::unique_ptr<PrunedFFT> pruned_;
+  Field execPruned() const;
   StrayFieldKernel kernel_;
   std::size_t sourceOffset_ = 0;
   std::size_t sourcePitch_ = 0;
