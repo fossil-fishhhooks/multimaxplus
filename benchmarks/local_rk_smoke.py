@@ -7,6 +7,8 @@ Uses build-a100; both ranks must see the same two GPUs.
 import os
 from pathlib import Path
 import sys
+import re
+import tempfile
 
 import numpy as np
 
@@ -18,6 +20,7 @@ from mumaxplus import Ferromagnet, Grid, World
 if os.environ.get("OMPI_COMM_WORLD_SIZE") != "2" or "--multigpu" not in sys.argv:
     raise SystemExit("Launch with two MPI ranks and --multigpu")
 
+os.environ["MUMAXPLUS_PROFILE_STEPS"] = "1"
 failures = []
 for shape in [(8, 6, 4), (17, 19, 8), (5, 7, 6), (8, 6, 1), (8, 6, 3)]:
     world = World((2e-9, 2e-9, 2e-9))
@@ -39,7 +42,24 @@ for shape in [(8, 6, 4), (17, 19, 8), (5, 7, 6), (8, 6, 1), (8, 6, 3)]:
         solver.time = 0
         solver.timestep = 1e-13
         magnet.magnetization = initial
-        solver.steps(12)
+        # Check that eligible cases really execute the optimized branch.
+        with tempfile.TemporaryFile(mode="w+b") as log:
+            saved_stderr = os.dup(2)
+            try:
+                os.dup2(log.fileno(), 2)
+                solver.steps(12)
+            finally:
+                os.dup2(saved_stderr, 2)
+                os.close(saved_stderr)
+            log.seek(0)
+            text = log.read().decode()
+        expected = flag == "1" and shape[2] in (4, 6, 8)
+        activations = re.findall(r"local-rk=([01])", text)
+        if not activations or any(int(a) != int(expected) for a in activations):
+            failures.append((shape, flag, "wrong branch", activations))
+        print(f"rank={os.environ['OMPI_COMM_WORLD_RANK']} grid={shape} "
+              f"flag={flag} local-rk={sorted(set(activations))} "
+              f"expected={int(expected)}", flush=True)
         # Public evaluations must still return complete fields on every rank.
         snapshots.append([np.asarray(magnet.magnetization.get()).copy(),
                           np.asarray(magnet.exchange_field.eval()).copy(),

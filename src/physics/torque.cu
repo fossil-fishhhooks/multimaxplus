@@ -19,6 +19,7 @@
 #include "stepprofile.hpp"
 #include "strayfield.hpp"
 #include "dynamicequation.hpp"
+#include "thermalnoise.hpp"
 #include <cstdlib>
 #include <cstring>
 
@@ -105,12 +106,17 @@ const Ferromagnet* localRkMagnet(const DynamicEquation& eq) {
   const auto* rhs = dynamic_cast<const FM_FieldQuantity*>(eq.rhs.get());
   if (!rhs || !rhs->evaluates(evalTorque)) return nullptr;
   const auto* magnet = rhs->source();
+  // The standard noise evaluator does not provide a generic assuredZero hook.
+  const auto* noise = dynamic_cast<const FM_FieldQuantity*>(eq.noiseTerm.get());
+  const bool zeroNoise = !eq.noiseTerm || eq.noiseTerm->assuredZero() ||
+      (noise && noise->source() == magnet && noise->evaluates(evalThermalNoise) &&
+       thermalNoiseAssuredZero(magnet));
   const auto& solver = magnet->world()->timesolver();
   const auto& session = magnet->world()->session();
   if (!session.multiGpuEnabled() || session.size() != 2 ||
       solver.hasAdaptiveTimeStep() || solver.equations().size() != 1 ||
       eq.x != magnet->magnetization() ||
-      (eq.noiseTerm && !eq.noiseTerm->assuredZero()) ||
+      !zeroNoise ||
       !spinTransferTorqueAssuredZero(magnet) || !canFuseLlgFields(magnet) ||
       !magnet->getStrayField(magnet)->supportsLocalSlab()) return nullptr;
   return magnet;

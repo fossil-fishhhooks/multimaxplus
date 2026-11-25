@@ -143,7 +143,7 @@ RungeKuttaStepper::RungeKuttaStageExecutor::RungeKuttaStageExecutor(
     firstCell_ = session.rank() * localCells_;
   }
   // Noise term evaluated only here, it remains constant throughout all stages
-  if (eq_.noiseTerm && !eq_.noiseTerm->assuredZero())
+  if (!localMagnet_ && eq_.noiseTerm && !eq_.noiseTerm->assuredZero())
     noise = eq_.noiseTerm->eval();
 }
 
