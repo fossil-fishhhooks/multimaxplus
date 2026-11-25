@@ -4,10 +4,11 @@
 Multimaxplus is a fork of [mumax⁺](https://github.com/mumax/plus) designed for high performance micromagnetics simulations. It extends mumax⁺'s GPU-acceleration capability to systems with multiple server class GPUs, splitting loads between them for faster large simulations. Multimaxplus also includes a minor performance increase even on single-GPU systems.
 
 
-# Performance
+## Performance
 ![speedups](docs/diagrams/plots/02_speedup.png)
 ![speedups2](docs/diagrams/plots/01_timestep_time.png)
 ![timing](docs/diagrams/plots/04_breakdown_512x512x32.png)
+These plots may not represent observed speedups across all problems.
 
 ## Details
 It distributes demagnetizing-field FFTs across GPUs using NVIDIA cuFFTMp
