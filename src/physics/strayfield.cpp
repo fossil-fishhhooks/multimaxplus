@@ -117,6 +117,12 @@ std::shared_ptr<const System> StrayField::system() const {
   return system_;
 }
 
+Field StrayFieldExecutor::execLocalSlab() const { return exec(); }
+
+Field StrayField::evalLocalSlab() const {
+  return executor_->execLocalSlab();
+}
+
 Field StrayField::eval() const {
   if (assuredZero()) {
     return Field(system(), ncomp(), 0.0);

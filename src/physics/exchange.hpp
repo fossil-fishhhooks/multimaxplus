@@ -7,6 +7,7 @@ class Field;
 
 bool exchangeAssuredZero(const Ferromagnet*);
 Field evalExchangeField(const Ferromagnet*);
+Field evalExchangeFieldLocalSlab(const Ferromagnet*);
 Field evalExchangeEnergyDensity(const Ferromagnet*);
 real evalExchangeEnergy(const Ferromagnet*);
 

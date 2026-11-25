@@ -17,6 +17,10 @@
 #include "timesolver.hpp"
 #include "torque.hpp"
 #include "stepprofile.hpp"
+#include "strayfield.hpp"
+#include "dynamicequation.hpp"
+#include <cstdlib>
+#include <cstring>
 
 Field evalTorque(const Ferromagnet* magnet) {
   Field torque = evalLlgTorque(magnet);
@@ -77,8 +81,11 @@ __global__ void k_llgtorque_fused(CuField torque,
                                  real3 bias,
                                  const CuParameter alpha,
                                  const CuParameter gamma,
-                                 const CuParameter frozenSpins) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+                                 const CuParameter frozenSpins,
+                                 int firstCell, int localCells) {
+  int localIdx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (localIdx >= localCells) return;
+  int idx = firstCell + localIdx;
   if (!torque.cellInGrid(idx))
     return;
   if (!torque.cellInGeometry(idx) || frozenSpins.valueAt(idx) != 0) {
@@ -92,25 +99,48 @@ __global__ void k_llgtorque_fused(CuField torque,
                                            alpha.valueAt(idx), gamma.valueAt(idx)));
 }
 
-Field evalLlgTorque(const Ferromagnet* magnet) {
+const Ferromagnet* localRkMagnet(const DynamicEquation& eq) {
+  const char* flag = std::getenv("MUMAXPLUS_LOCAL_RK");
+  if (flag && std::strcmp(flag, "0") == 0) return nullptr;
+  const auto* rhs = dynamic_cast<const FM_FieldQuantity*>(eq.rhs.get());
+  if (!rhs || !rhs->evaluates(evalTorque)) return nullptr;
+  const auto* magnet = rhs->source();
+  const auto& solver = magnet->world()->timesolver();
+  const auto& session = magnet->world()->session();
+  if (!session.multiGpuEnabled() || session.size() != 2 ||
+      solver.hasAdaptiveTimeStep() || solver.equations().size() != 1 ||
+      eq.x != magnet->magnetization() ||
+      (eq.noiseTerm && !eq.noiseTerm->assuredZero()) ||
+      !spinTransferTorqueAssuredZero(magnet) || !canFuseLlgFields(magnet) ||
+      !magnet->getStrayField(magnet)->supportsLocalSlab()) return nullptr;
+  return magnet;
+}
+
+static Field llgTorque(const Ferromagnet* magnet, bool localOnly) {
   Field torque(magnet->system(), 3);
   if (canFuseLlgFields(magnet)) {
     StepCheckpoint checkpoint;
     auto& timings = stepTimings();
-    Field exchange = evalExchangeField(magnet);
+    Field exchange = localOnly ? evalExchangeFieldLocalSlab(magnet)
+                               : evalExchangeField(magnet);
     timings.exchange += checkpoint();
     const real3 bias = magnet->mumaxWorld()->biasMagneticField +
                        magnet->biasMagneticField.getUniformValue();
     timings.external += checkpoint();
-    Field demag = evalDemagField(magnet);
+    Field demag = localOnly ? magnet->getStrayField(magnet)->evalLocalSlab()
+                            : evalDemagField(magnet);
     timings.demag += checkpoint();
 
     auto m = magnet->magnetization()->field().cu();
     auto alpha = magnet->alpha.cu();
     auto gamma = magnet->gamma.cu();
     auto frozenSpins = magnet->frozenSpins.cu();
-    cudaLaunch(torque.grid().ncells(), k_llgtorque_fused, torque.cu(), m,
-               exchange.cu(), demag.cu(), bias, alpha, gamma, frozenSpins);
+    const auto& session = magnet->world()->session();
+    const int count = torque.grid().ncells() / (localOnly ? session.size() : 1);
+    const int first = localOnly ? session.rank() * count : 0;
+    cudaLaunch(count, k_llgtorque_fused, torque.cu(), m,
+               exchange.cu(), demag.cu(), bias, alpha, gamma, frozenSpins,
+               first, count);
     // This includes field assembly as well as the LLG arithmetic.
     timings.llg += checkpoint();
     return torque;
@@ -126,6 +156,9 @@ Field evalLlgTorque(const Ferromagnet* magnet) {
   stepTimings().llg += checkpoint();
   return torque;
 }
+
+Field evalLlgTorque(const Ferromagnet* magnet) { return llgTorque(magnet, false); }
+Field evalLocalLlgTorque(const Ferromagnet* magnet) { return llgTorque(magnet, true); }
 
 __global__ void k_dampingtorque(CuField torque,
                                 const CuField mField,

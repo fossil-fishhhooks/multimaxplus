@@ -10,6 +10,7 @@
 
 class TimeSolver;
 class Variable;
+class Ferromagnet;
 
 class RungeKuttaStepper : public Stepper {
  public:
@@ -36,6 +37,9 @@ class RungeKuttaStepper::RungeKuttaStageExecutor {
   real getError() const;
 
  private:
+  void gatherStage() const;
+  const Ferromagnet* localMagnet_ = nullptr;
+  int firstCell_ = 0, localCells_ = -1;
   Field x0;
   const ButcherTableau& butcher;
   const RungeKuttaStepper& stepper;

@@ -53,6 +53,8 @@ class StrayFieldExecutor {
 
   /** Compute and return the stray field. */
   virtual Field exec() const = 0;
+  virtual bool supportsLocalSlab() const { return false; }
+  virtual Field execLocalSlab() const;
 
   /** Return the method of the executor. */
   virtual Method method() const = 0;
@@ -154,6 +156,8 @@ class StrayField : public FieldQuantity {
 
   /** Compute and return the stray field. */
   Field eval() const;
+  bool supportsLocalSlab() const { return executor_->supportsLocalSlab(); }
+  Field evalLocalSlab() const;
 
   /** Return true if one can be sure that the stray field is exactly zero. */
   bool assuredZero() const;

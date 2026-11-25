@@ -660,7 +660,11 @@ StrayFieldFFTExecutor::~StrayFieldFFTExecutor() {
   }
 }
 
-Field StrayFieldFFTExecutor::execPruned() const {
+Field StrayFieldFFTExecutor::execLocalSlab() const {
+  return pruned_ ? execPruned(false) : exec();
+}
+
+Field StrayFieldFFTExecutor::execPruned(bool gather) const {
   auto& p = *pruned_;
   const auto& session = magnet_->world()->session();
   StepCheckpoint checkpoint;
@@ -746,8 +750,8 @@ Field StrayFieldFFTExecutor::execPruned() const {
                   p.padded.x - p.physical.x, p.componentValues, p.localCells);
   checkCudaError(cudaStreamSynchronize(getCudaStream()));
   timings.demagCrop += checkpoint();
-  // The rest of the solver still expects a complete physical field per rank.
-  for (int c = 0; c < 3; ++c) {
+  // Public evaluations remain complete; the restricted RK path consumes slabs.
+  for (int c = 0; gather && c < 3; ++c) {
     const int result = MPI_Allgather(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL,
         h.device_ptr(c), p.localCells, mpiReal, session.communicator());
     if (result != MPI_SUCCESS) session.abort(result);

@@ -15,6 +15,7 @@ struct StepTimings {
   // Demag substages are included in the outer demag total, not additional work.
   double demagSetup = 0, demagPad = 0, demagForward = 0, demagMultiply = 0;
   double demagInverse = 0, demagCrop = 0, demagGather = 0;
+  bool localRk = false;
   int attempts = 0;
 };
 

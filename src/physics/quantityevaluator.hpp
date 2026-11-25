@@ -40,6 +40,12 @@ class FieldQuantityEvaluator : public FieldQuantity {
                                          assuredZeroFunc_);
   }
 
+  const T* source() const { return ptr_; }
+  bool evaluates(Field (*function)(const T*)) const {
+    auto target = evalfunc_.template target<Field (*)(const T*)>();
+    return target && *target == function;
+  }
+
   int ncomp() const { return ncomp_; }
   std::shared_ptr<const System> system() const { return ptr_->system(); }
   std::string name() const { return name_; }

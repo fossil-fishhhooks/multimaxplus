@@ -15,6 +15,9 @@
 #include "timesolver.hpp"
 #include "stepprofile.hpp"
 #include "variable.hpp"
+#include "torque.hpp"
+#include "cudaerror.hpp"
+#include <mpi.h>
 
 RungeKuttaStepper::RungeKuttaStepper(TimeSolver* solver, RKmethod method)
     : butcher_(ButcherTableau::get(method)),
@@ -102,6 +105,7 @@ void RungeKuttaStepper::step() {
     const auto& session = solver_->equations().front().x->system()->world()->session();
     std::ostringstream line;
     line << "step-profile rank=" << session.rank()
+         << " local-rk=" << timings.localRk
          << " t=" << solver_->time() << " attempts=" << timings.attempts
          << " setup=" << timings.setup
          << " stage-build=" << timings.stageBuild
@@ -131,13 +135,20 @@ RungeKuttaStepper::RungeKuttaStageExecutor::RungeKuttaStageExecutor(
       x(*eq.x),
       k(stepper.nStages()),
       eq_(eq) {
+  localMagnet_ = localRkMagnet(eq);
+  if (localMagnet_) {
+    stepTimings().localRk = true;
+    const auto& session = x.system()->world()->session();
+    localCells_ = x0.grid().ncells() / session.size();
+    firstCell_ = session.rank() * localCells_;
+  }
   // Noise term evaluated only here, it remains constant throughout all stages
   if (eq_.noiseTerm && !eq_.noiseTerm->assuredZero())
     noise = eq_.noiseTerm->eval();
 }
 
 void RungeKuttaStepper::RungeKuttaStageExecutor::setStageK(int stage) {
-  k[stage] = eq_.rhs->eval();
+  k[stage] = localMagnet_ ? evalLocalLlgTorque(localMagnet_) : eq_.rhs->eval();
 
   auto dt = stepper.solver_->timestep();
   if (noise)
@@ -153,7 +164,8 @@ void RungeKuttaStepper::RungeKuttaStageExecutor::setStageX(int stage) {
   real dt = stepper.solver_->timestep();
   const bool normalize = dynamic_cast<const NormalizedVariable*>(&x) != nullptr;
   addWeightedInto(x0, k, stepper.stageWeightsGpu_.at(stage), dt, stage,
-                  x.field().cu(), normalize);
+                  x.field().cu(), normalize, firstCell_, localCells_);
+  gatherStage();
 
   timings.stageAssign += checkpoint();
 }
@@ -164,8 +176,26 @@ void RungeKuttaStepper::RungeKuttaStageExecutor::setFinalX() {
   real dt = stepper.solver_->timestep();
   const bool normalize = dynamic_cast<const NormalizedVariable*>(&x) != nullptr;
   addWeightedInto(x0, k, stepper.finalWeightsGpu_, dt, stepper.nStages(),
-                  x.field().cu(), normalize);
+                  x.field().cu(), normalize, firstCell_, localCells_);
+  gatherStage();
   timings.finalAssign += checkpoint();
+}
+
+// Keep magnetization replicated for exchange neighbor reads and public APIs.
+// k and intermediate fields are valid ONLY on this rank's slab.
+void RungeKuttaStepper::RungeKuttaStageExecutor::gatherStage() const {
+  if (!localMagnet_) return;
+  const auto& session = x.system()->world()->session();
+#if FP_PRECISION == SINGLE
+  const MPI_Datatype datatype = MPI_FLOAT;
+#else
+  const MPI_Datatype datatype = MPI_DOUBLE;
+#endif
+  for (int c = 0; c < 3; ++c) {
+    int result = MPI_Allgather(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL,
+        x.field().device_ptr(c), localCells_, datatype, session.communicator());
+    if (result != MPI_SUCCESS) session.abort(result);
+  }
 }
 
 void RungeKuttaStepper::RungeKuttaStageExecutor::resetX() {

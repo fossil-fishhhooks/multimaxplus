@@ -36,6 +36,8 @@ class StrayFieldFFTExecutor : public StrayFieldExecutor {
 
   /** Compute and return the stray field. */
   Field exec() const;
+  bool supportsLocalSlab() const override { return bool(pruned_); }
+  Field execLocalSlab() const override;
 
   /** Return the computation method which is METHOD_FFT. */
   Method method() const { return StrayFieldExecutor::METHOD_FFT; }
@@ -57,7 +59,7 @@ class StrayFieldFFTExecutor : public StrayFieldExecutor {
   // Optional row-pruned pipeline; the general cuFFTMp path remains available.
   struct PrunedFFT;
   std::unique_ptr<PrunedFFT> pruned_;
-  Field execPruned() const;
+  Field execPruned(bool gather = true) const;
   StrayFieldKernel kernel_;
   std::size_t sourceOffset_ = 0;
   std::size_t sourcePitch_ = 0;

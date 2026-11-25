@@ -42,7 +42,8 @@ void addWeightedInto(const Field& input,
                   real dt,
                   int count,
                   CuField dest,
-                  bool normalize);
+                  bool normalize,
+                  int firstCell = 0, int localCells = -1);
 
 Field operator*(real a, const Field& x);
 

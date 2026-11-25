@@ -209,8 +209,10 @@ __global__ void k_addFieldsW(CuField out,
                              const real* weights,
                              real dt,
                              int count,
-                             bool normalize) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+                             bool normalize, int firstCell, int localCells) {
+  int localIdx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (localIdx >= localCells) return;
+  int idx = firstCell + localIdx;
 
   if (out.ncomp == 3) {
     real components[3];
@@ -274,7 +276,7 @@ void addWeightedInto(const Field& input,
                   real dt,
                   int count,
                   CuField dest,
-                  bool normalize) {
+                  bool normalize, int firstCell, int localCells) {
                     
   if (count < 0 || static_cast<std::size_t>(count) > k.size() ||
       static_cast<std::size_t>(count) > weights.size()) {
@@ -290,9 +292,9 @@ void addWeightedInto(const Field& input,
   const CuField* stagesgpu = stagesBuffer.get();
   const real* weightsgpu = weights.get();
 
-  int ncells = dest.system.grid.ncells();
+  int ncells = localCells < 0 ? dest.system.grid.ncells() : localCells;
   cudaLaunch(ncells, k_addFieldsW, dest, input.cu(), stagesgpu, weightsgpu,
-             dt, count, normalize);
+             dt, count, normalize, firstCell, ncells);
 
 }
 

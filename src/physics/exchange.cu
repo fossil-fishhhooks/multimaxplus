@@ -260,7 +260,7 @@ Field evalEffectiveSublattice(const Ferromagnet* magnet) {
   return netSub;
 }
 
-Field evalExchangeField(const Ferromagnet* magnet) {
+static Field exchangeField(const Ferromagnet* magnet, bool localOnly) {
   const Session& session = magnet->world()->session();
   const int3 size = magnet->grid().size();
   const bool is2D = size.z == 1;
@@ -324,7 +324,7 @@ Field evalExchangeField(const Ferromagnet* magnet) {
     }
   }
 
-  if (session.multiGpuEnabled()) {
+  if (session.multiGpuEnabled() && !localOnly) {
     std::vector<int> counts(session.size());
     std::vector<int> displs(session.size());
     for (int r = 0; r < session.size(); r++) {
@@ -341,6 +341,14 @@ Field evalExchangeField(const Ferromagnet* magnet) {
     }
   }
   return hField;
+}
+
+Field evalExchangeField(const Ferromagnet* magnet) {
+  return exchangeField(magnet, false);
+}
+
+Field evalExchangeFieldLocalSlab(const Ferromagnet* magnet) {
+  return exchangeField(magnet, true);
 }
 
 Field evalExchangeEnergyDensity(const Ferromagnet* magnet) {

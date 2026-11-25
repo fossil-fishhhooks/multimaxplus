@@ -5,6 +5,11 @@
 
 class Ferromagnet;
 class Field;
+class DynamicEquation;
+
+// Experimental: only the common, fixed-step, single-equation pruned FFT case.
+const Ferromagnet* localRkMagnet(const DynamicEquation&);
+Field evalLocalLlgTorque(const Ferromagnet*);
 
 Field evalTorque(const Ferromagnet*);
 Field evalLlgTorque(const Ferromagnet*);
