@@ -257,6 +257,48 @@ replace broader numerical validation or a timestep-convergence study. At this
 guide's update, the latest distributed-exchange and fused-normalization changes
 are awaiting GPU validation.
 
+## Local Runge–Kutta execution on two GPUs
+
+With `--multigpu` and two ranks, deterministic ordinary ferromagnets use local
+exchange, torque, effective-field assembly and RK updates by default. Updated
+magnetization is gathered after every stage and final update, so neighbor reads,
+inter-magnet coupling and public field evaluations still see complete fields.
+A shared physical-slab layout handles uneven z splits and splits thin films in y.
+
+Both fixed and adaptive RK methods are supported. Adaptive stepping reconciles
+the initial timestep across ranks and uses a global maximum error so acceptance,
+rejection and timestep adjustment agree. Local error calculation uses a parallel
+weighted reduction; it never reads the unowned part of a partial stage field.
+
+The pruned FFT path omits the final demag gather internally. Other FFT layouts
+and brute-force demag keep their complete-field fallback. Additional terms such
+as anisotropy, DMI, time-dependent bias, static magnetoelastic fields and STT are
+included; their existing evaluators can still compute complete contributions.
+They are added only over owned cells. This broadens compatibility without claiming
+that every term has been parallelized. Multiple ordinary ferromagnets are allowed;
+all stage magnetizations are updated before any stage RHS is evaluated.
+
+Thermal noise, magnetic sublattices, custom equations and coupled elastodynamics
+keep the previous path for the whole solver. This optimization does not establish
+stochastic multi-rank reproducibility. More than two ranks also retain the previous
+path pending validation. Small grids may still be faster on one GPU.
+
+Set `MUMAXPLUS_LOCAL_RK=0` to disable local RK for comparisons. Setting it to `1`
+or leaving it unset enables supported cases. Checkpoint logs show `local-rk=1`
+when it actually runs. RK assignment timings include the magnetization gathers.
+
+After building, run the two-GPU regression checks from the checkout root:
+
+```bash
+mpirun --bind-to none -n 2 python benchmarks/local_rk_smoke.py --multigpu
+```
+
+The checks compare enabled/disabled paths, require actual activation, verify rank
+agreement, cover uneven and thin grids, geometry, material variation, DMI,
+anisotropy, STT, periodic boundaries and multiple magnets, and exercise adaptive
+rejection and analytic macrospin precession. Use `--build-dir` for another build.
+The broadened implementation requires GPU validation before performance claims.
+
 ## Profiling
 
 Enable synchronized per-step checkpoints with:

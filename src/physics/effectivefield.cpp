@@ -14,46 +14,56 @@
 #include "magnetoelasticfield.hpp"
 #include "zeeman.hpp"
 #include "stepprofile.hpp"
+#include "strayfield.hpp"
+#include "physicalslab.hpp"
 
-Field evalEffectiveField(const Ferromagnet* magnet) {
+static Field effectiveField(const Ferromagnet* magnet, bool localOnly) {
   StepCheckpoint checkpoint;
   auto& timings = stepTimings();
   // there will probably be exchange, otherwise safely initialized as 0
-  Field h = evalExchangeField(magnet);
+  Field h = localOnly ? evalExchangeFieldLocalSlab(magnet) : evalExchangeField(magnet);
+  const auto size = magnet->grid().size();
+  const auto& session = magnet->world()->session();
+  const PhysicalSlab slab(size.x, size.y, size.z, session.rank(), session.size());
+  auto addContribution = [&](const Field& contribution) {
+    if (localOnly) addToSlab(h, 1, contribution, slab.firstCell, slab.localCells);
+    else h += contribution;
+  };
   timings.exchange += checkpoint();
   if (!anisotropyAssuredZero(magnet)) {
     checkpoint();
     Field contribution = evalAnisotropyField(magnet);
     timings.otherFields += checkpoint();
-    h += contribution;
+    addContribution(contribution);
     timings.fieldAdd += checkpoint();
   }
   if (!externalFieldAssuredZero(magnet)) {
     checkpoint();
     Field contribution = evalExternalField(magnet);
     timings.external += checkpoint();
-    h += contribution;
+    addContribution(contribution);
     timings.fieldAdd += checkpoint();
   }
   if (!inhomoDmiAssuredZero(magnet)) {
     checkpoint();
     Field contribution = evalDmiField(magnet);
     timings.otherFields += checkpoint();
-    h += contribution;
+    addContribution(contribution);
     timings.fieldAdd += checkpoint();
   }
   if (!demagFieldAssuredZero(magnet)) {
     checkpoint();
-    Field contribution = evalDemagField(magnet);
+    Field contribution = localOnly ? magnet->getStrayField(magnet)->evalLocalSlab()
+                                   : evalDemagField(magnet);
     timings.demag += checkpoint();
-    h += contribution;
+    addContribution(contribution);
     timings.fieldAdd += checkpoint();
   }
   if (!magnetoelasticAssuredZero(magnet)) {
     checkpoint();
     Field contribution = evalMagnetoelasticField(magnet);
     timings.otherFields += checkpoint();
-    h += contribution;
+    addContribution(contribution);
     timings.fieldAdd += checkpoint();
   }
   if (magnet->isSublattice()) {
@@ -62,7 +72,7 @@ Field evalEffectiveField(const Ferromagnet* magnet) {
       checkpoint();
       Field contribution = evalInHomogeneousAfmExchangeField(magnet);
       timings.otherFields += checkpoint();
-      h += contribution;
+      addContribution(contribution);
       timings.fieldAdd += checkpoint();
     }
   }
@@ -70,7 +80,7 @@ Field evalEffectiveField(const Ferromagnet* magnet) {
     checkpoint();
     Field contribution = evalHomogeneousAfmExchangeField(magnet);
     timings.otherFields += checkpoint();
-    h += contribution;
+    addContribution(contribution);
     timings.fieldAdd += checkpoint();
   }
   // Homogeneous (local) DMI term
@@ -78,7 +88,7 @@ Field evalEffectiveField(const Ferromagnet* magnet) {
     checkpoint();
     Field contribution = evalHomoDmiField(magnet);
     timings.otherFields += checkpoint();
-    h += contribution;
+    addContribution(contribution);
     timings.fieldAdd += checkpoint();
   }
   // ATM anisotropic exchange
@@ -86,10 +96,15 @@ Field evalEffectiveField(const Ferromagnet* magnet) {
     checkpoint();
     Field contribution = evalAtmExchangeField(magnet);
     timings.otherFields += checkpoint();
-    h += contribution;
+    addContribution(contribution);
     timings.fieldAdd += checkpoint();
   }
   return h;
+}
+
+Field evalEffectiveField(const Ferromagnet* magnet) { return effectiveField(magnet, false); }
+Field evalEffectiveFieldLocalSlab(const Ferromagnet* magnet) {
+  return effectiveField(magnet, true);
 }
 
 FM_FieldQuantity effectiveFieldQuantity(const Ferromagnet* magnet) {

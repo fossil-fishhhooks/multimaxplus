@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <vector>
 
@@ -159,6 +161,22 @@ void addTo(Field& y, real a, const Field& x) {
   add(y, 1, y, a, x);
 }
 
+__global__ void k_addToSlab(CuField y, real a, CuField x,
+                            int firstCell, int localCells) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  const int idx = firstCell + i;
+  if (i >= localCells || !y.cellInGeometry(idx)) return;
+  for (int c = 0; c < y.ncomp; ++c)
+    y.setValueInCell(idx, c, y.valueAt(idx, c) + a * x.valueAt(idx, c));
+}
+
+void addToSlab(Field& y, real a, const Field& x, int firstCell, int localCells) {
+  if (x.system() != y.system() || x.ncomp() != y.ncomp())
+    throw std::invalid_argument("Incompatible fields in slab addition");
+  if (localCells > 0)
+    cudaLaunch(localCells, k_addToSlab, y.cu(), a, x.cu(), firstCell, localCells);
+}
+
 void addTo(Field& y, real3 a, const Field& x) {
   real3 a0 = real3{1, 1, 1};
   add(y, a0, y, a, x);
@@ -293,9 +311,79 @@ void addWeightedInto(const Field& input,
   const real* weightsgpu = weights.get();
 
   int ncells = localCells < 0 ? dest.system.grid.ncells() : localCells;
+  if (ncells == 0) return;
   cudaLaunch(ncells, k_addFieldsW, dest, input.cu(), stagesgpu, weightsgpu,
              dt, count, normalize, firstCell, ncells);
 
+}
+
+namespace {
+__global__ void k_weightedError(real* partial, const CuField* stages,
+                                const real* weights, real dt, int count,
+                                int firstCell, int localCells) {
+  __shared__ real values[BLOCKDIM];
+  real maximum = 0;
+  const int tid = threadIdx.x;
+  for (int i = blockIdx.x * blockDim.x + tid; i < localCells;
+       i += blockDim.x * gridDim.x) {
+    const int idx = firstCell + i;
+    if (!stages[0].cellInGeometry(idx)) continue;
+    real3 error{0, 0, 0};
+    for (int c = 0; c < 3; ++c) {
+      real value = 0;
+      for (int k = 0; k < count; ++k)
+        value += (dt * weights[k]) * stages[k].valueAt(idx, c);
+      if (c == 0) error.x = value;
+      else if (c == 1) error.y = value;
+      else error.z = value;
+    }
+    const real value = norm(error);
+    // A nonfinite error must reject the step, rather than disappear in max().
+    maximum = isfinite(value) ? fmax(maximum, value) : INFINITY;
+  }
+  values[tid] = maximum;
+  __syncthreads();
+  for (int stride = BLOCKDIM / 2; stride > 0; stride /= 2) {
+    if (tid < stride) values[tid] = fmax(values[tid], values[tid + stride]);
+    __syncthreads();
+  }
+  if (tid == 0) partial[blockIdx.x] = values[0];
+}
+
+__global__ void k_maxErrorPartial(real* result, const real* partial, int count) {
+  __shared__ real values[BLOCKDIM];
+  const int tid = threadIdx.x;
+  real maximum = 0;
+  for (int i = tid; i < count; i += BLOCKDIM)
+    maximum = fmax(maximum, partial[i]);
+  values[tid] = maximum;
+  __syncthreads();
+  for (int stride = BLOCKDIM / 2; stride > 0; stride /= 2) {
+    if (tid < stride) values[tid] = fmax(values[tid], values[tid + stride]);
+    __syncthreads();
+  }
+  if (tid == 0) *result = values[0];
+}
+}  // namespace
+
+real weightedErrorNorm(const std::vector<Field>& k, const GpuBuffer<real>& weights,
+                       real dt, int firstCell, int localCells) {
+  if (localCells == 0) return 0;
+  std::vector<CuField> stages;
+  for (const auto& stage : k) stages.push_back(stage.cu());
+  GpuBuffer<CuField> stagesGpu(stages);
+  const int blocks = std::min(4096, 1 + (localCells - 1) / BLOCKDIM);
+  GpuBuffer<real> partial(blocks), result(1);
+  k_weightedError<<<blocks, BLOCKDIM, 0, getCudaStream()>>>(partial.get(),
+      stagesGpu.get(), weights.get(), dt, int(k.size()), firstCell, localCells);
+  checkCudaError(cudaPeekAtLastError());
+  cudaLaunchReductionKernel(k_maxErrorPartial, result.get(),
+                            static_cast<const real*>(partial.get()), blocks);
+  real value;
+  checkCudaError(cudaMemcpyAsync(&value, result.get(), sizeof(real),
+                                cudaMemcpyDeviceToHost, getCudaStream()));
+  checkCudaError(cudaStreamSynchronize(getCudaStream()));
+  return value;
 }
 
 Field operator*(real a, const Field& x) {

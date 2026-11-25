@@ -27,6 +27,7 @@ Field operator+(const Field& x1, const Field& x2);
 
 /// y += a*x
 void addTo(Field& y, real a, const Field& x);
+void addToSlab(Field& y, real a, const Field& x, int firstCell, int localCells);
 
 void addTo(Field& y, real3 a, const Field& x);
 
@@ -44,6 +45,10 @@ void addWeightedInto(const Field& input,
                   CuField dest,
                   bool normalize,
                   int firstCell = 0, int localCells = -1);
+
+// Max norm of the embedded RK error; reads only the requested valid cells.
+real weightedErrorNorm(const std::vector<Field>& k, const GpuBuffer<real>& weights,
+                       real dt, int firstCell, int localCells);
 
 Field operator*(real a, const Field& x);
 

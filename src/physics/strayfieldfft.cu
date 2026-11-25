@@ -27,6 +27,7 @@
 #include "strayfieldkernel.hpp"
 #include "system.hpp"
 #include "stepprofile.hpp"
+#include "slabops.hpp"
 
 #if FP_PRECISION == SINGLE
 const cufftType FFT = CUFFT_R2C;
@@ -361,6 +362,7 @@ __global__ void k_unpad_pruned(CuField out, const real* rows,
 // Balanced physical-z slabs before/after the transform, and the same ky slabs
 // as cuFFTMp between them. Tensor spectra and multiplication are unchanged.
 struct StrayFieldFFTExecutor::PrunedFFT {
+  PhysicalSlab slab;
   int3 physical, padded;
   int localZ, localY, nxComplex, rowStride, firstCell;
   int componentValues, localCells, pencilRows, messageValues;
@@ -369,12 +371,13 @@ struct StrayFieldFFTExecutor::PrunedFFT {
   LocalFFTPlan xForward, xBackward, yPlan, zPlan;
 
   PrunedFFT(int3 physical, int3 padded, int rank, int processes)
-      : physical(physical), padded(padded), localZ(physical.z / processes),
+      : slab(physical.x, physical.y, physical.z, rank, processes),
+        physical(physical), padded(padded), localZ(physical.z / processes),
         localY(padded.y / processes), nxComplex(padded.x / 2 + 1),
         rowStride(2 * nxComplex),
-        firstCell(rank * localZ * physical.y * physical.x),
+        firstCell(slab.firstCell),
         componentValues(localZ * physical.y * rowStride),
-        localCells(localZ * physical.y * physical.x),
+        localCells(slab.localCells),
         pencilRows(3 * localZ * nxComplex),
         messageValues(2 * localY * pencilRows),
         xRows(size_t(3) * componentValues),
@@ -751,11 +754,7 @@ Field StrayFieldFFTExecutor::execPruned(bool gather) const {
   checkCudaError(cudaStreamSynchronize(getCudaStream()));
   timings.demagCrop += checkpoint();
   // Public evaluations remain complete; the restricted RK path consumes slabs.
-  for (int c = 0; gather && c < 3; ++c) {
-    const int result = MPI_Allgather(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL,
-        h.device_ptr(c), p.localCells, mpiReal, session.communicator());
-    if (result != MPI_SUCCESS) session.abort(result);
-  }
+  if (gather) gatherSlab(h, p.slab, session);
   timings.demagGather += checkpoint();
   return h;
 }

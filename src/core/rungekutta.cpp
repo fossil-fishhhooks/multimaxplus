@@ -18,6 +18,7 @@
 #include "torque.hpp"
 #include "cudaerror.hpp"
 #include <mpi.h>
+#include "slabops.hpp"
 
 RungeKuttaStepper::RungeKuttaStepper(TimeSolver* solver, RKmethod method)
     : butcher_(ButcherTableau::get(method)),
@@ -26,6 +27,10 @@ RungeKuttaStepper::RungeKuttaStepper(TimeSolver* solver, RKmethod method)
   stageWeightsGpu_.reserve(butcher_.rkMatrix.size());
   for (const auto& weights : butcher_.rkMatrix)
     stageWeightsGpu_.emplace_back(weights);
+  std::vector<real> errorWeights(butcher_.weights1.size());
+  for (size_t i = 0; i < errorWeights.size(); ++i)
+    errorWeights[i] = butcher_.weights1[i] - butcher_.weights2[i];
+  errorWeightsGpu_ = GpuBuffer<real>(errorWeights);
 }
 
 int RungeKuttaStepper::nStages() const {
@@ -42,12 +47,28 @@ void RungeKuttaStepper::step() {
   StepTimingScope timingScope(timings);
   StepCheckpoint checkpoint;
 
+  const auto& session = solver_->equations().front().system()->world()->session();
+  int localRk = localRkMagnet(solver_->equations().front()) != nullptr;
+  if (session.multiGpuEnabled() && session.size() == 2) {
+    int result = MPI_Allreduce(MPI_IN_PLACE, &localRk, 1, MPI_INT, MPI_MIN,
+                               session.communicator());
+    if (result != MPI_SUCCESS) session.abort(result);
+  }
+
   // construct a Runge Kutta stage executor for every equation
   std::vector<RungeKuttaStepper::RungeKuttaStageExecutor> equations;
   for (auto eq : solver_->equations())
-    equations.emplace_back(eq, *this);
+    equations.emplace_back(eq, *this, localRk != 0);
 
   timings.setup += checkpoint();
+  if (session.multiGpuEnabled() && solver_->hasAdaptiveTimeStep()) {
+    // Start every attempt from the same dt, including the first adaptive step.
+    real dt = solver_->timestep();
+    int result = MPI_Allreduce(MPI_IN_PLACE, &dt, 1, slabRealType(), MPI_MIN,
+                               session.communicator());
+    if (result != MPI_SUCCESS) session.abort(result);
+    solver_->setTimeStep(dt);
+  }
   real t0 = solver_->time();
 
   bool success = false;
@@ -82,6 +103,12 @@ void RungeKuttaStepper::step() {
       if (real e = eq.getError(); e > error)
         error = e;
 
+    // All equations and ranks must accept/reject together, including fallbacks.
+    if (session.multiGpuEnabled()) {
+      int result = MPI_Allreduce(MPI_IN_PLACE, &error, 1, slabRealType(), MPI_MAX,
+                                 session.communicator());
+      if (result != MPI_SUCCESS) session.abort(result);
+    }
     timings.error += checkpoint();
     success = error < solver_->maxError();
 
@@ -128,19 +155,20 @@ void RungeKuttaStepper::step() {
 
 RungeKuttaStepper::RungeKuttaStageExecutor::RungeKuttaStageExecutor(
     DynamicEquation eq,
-    const RungeKuttaStepper& stepper)
+    const RungeKuttaStepper& stepper, bool localRk)
     : x0(eq.x->eval()),
       butcher(stepper.butcher_),
       stepper(stepper),
       x(*eq.x),
       k(stepper.nStages()),
       eq_(eq) {
-  localMagnet_ = localRkMagnet(eq);
+  localMagnet_ = localRk ? static_cast<const FM_FieldQuantity*>(eq.rhs.get())->source()
+                         : nullptr;
   if (localMagnet_) {
     stepTimings().localRk = true;
     const auto& session = x.system()->world()->session();
-    localCells_ = x0.grid().ncells() / session.size();
-    firstCell_ = session.rank() * localCells_;
+    const auto size = x0.grid().size();
+    slab_.emplace(size.x, size.y, size.z, session.rank(), session.size());
   }
   // Noise term evaluated only here, it remains constant throughout all stages
   if (!localMagnet_ && eq_.noiseTerm && !eq_.noiseTerm->assuredZero())
@@ -148,7 +176,7 @@ RungeKuttaStepper::RungeKuttaStageExecutor::RungeKuttaStageExecutor(
 }
 
 void RungeKuttaStepper::RungeKuttaStageExecutor::setStageK(int stage) {
-  k[stage] = localMagnet_ ? evalLocalLlgTorque(localMagnet_) : eq_.rhs->eval();
+  k[stage] = localMagnet_ ? evalLocalTorque(eq_) : eq_.rhs->eval();
 
   auto dt = stepper.solver_->timestep();
   if (noise)
@@ -164,7 +192,8 @@ void RungeKuttaStepper::RungeKuttaStageExecutor::setStageX(int stage) {
   real dt = stepper.solver_->timestep();
   const bool normalize = dynamic_cast<const NormalizedVariable*>(&x) != nullptr;
   addWeightedInto(x0, k, stepper.stageWeightsGpu_.at(stage), dt, stage,
-                  x.field().cu(), normalize, firstCell_, localCells_);
+                  x.field().cu(), normalize,
+                  slab_ ? slab_->firstCell : 0, slab_ ? slab_->localCells : -1);
   gatherStage();
 
   timings.stageAssign += checkpoint();
@@ -176,7 +205,8 @@ void RungeKuttaStepper::RungeKuttaStageExecutor::setFinalX() {
   real dt = stepper.solver_->timestep();
   const bool normalize = dynamic_cast<const NormalizedVariable*>(&x) != nullptr;
   addWeightedInto(x0, k, stepper.finalWeightsGpu_, dt, stepper.nStages(),
-                  x.field().cu(), normalize, firstCell_, localCells_);
+                  x.field().cu(), normalize,
+                  slab_ ? slab_->firstCell : 0, slab_ ? slab_->localCells : -1);
   gatherStage();
   timings.finalAssign += checkpoint();
 }
@@ -184,18 +214,7 @@ void RungeKuttaStepper::RungeKuttaStageExecutor::setFinalX() {
 // Keep magnetization replicated for exchange neighbor reads and public APIs.
 // k and intermediate fields are valid ONLY on this rank's slab.
 void RungeKuttaStepper::RungeKuttaStageExecutor::gatherStage() const {
-  if (!localMagnet_) return;
-  const auto& session = x.system()->world()->session();
-#if FP_PRECISION == SINGLE
-  const MPI_Datatype datatype = MPI_FLOAT;
-#else
-  const MPI_Datatype datatype = MPI_DOUBLE;
-#endif
-  for (int c = 0; c < 3; ++c) {
-    int result = MPI_Allgather(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL,
-        x.field().device_ptr(c), localCells_, datatype, session.communicator());
-    if (result != MPI_SUCCESS) session.abort(result);
-  }
+  if (slab_) gatherSlab(x.field(), *slab_, x.system()->world()->session());
 }
 
 void RungeKuttaStepper::RungeKuttaStageExecutor::resetX() {
@@ -203,14 +222,15 @@ void RungeKuttaStepper::RungeKuttaStageExecutor::resetX() {
 }
 
 real RungeKuttaStepper::RungeKuttaStageExecutor::getError() const {
+  if (slab_) {
+    return weightedErrorNorm(k, stepper.errorWeightsGpu_, stepper.solver_->timestep(),
+                             slab_->firstCell, slab_->localCells);
+  }
+  // Preserve the existing behavior for unrelated/custom equation types.
   Field err(x.system(), x.ncomp());
-
   err.makeZero();
-
-  auto dt = stepper.solver_->timestep();
-
-  for (int i = 0; i < stepper.nStages(); i++)
+  const real dt = stepper.solver_->timestep();
+  for (int i = 0; i < stepper.nStages(); ++i)
     addTo(err, dt * (butcher.weights1[i] - butcher.weights2[i]), k[i]);
-
   return maxVecNorm(err);
 }

@@ -54,6 +54,7 @@ class StrayFieldExecutor {
   /** Compute and return the stray field. */
   virtual Field exec() const = 0;
   virtual bool supportsLocalSlab() const { return false; }
+  // Valid on the PhysicalSlab owned by this rank; may return a full fallback.
   virtual Field execLocalSlab() const;
 
   /** Return the method of the executor. */

@@ -7,6 +7,7 @@
 #include "dynamicequation.hpp"
 #include "field.hpp"
 #include "stepper.hpp"
+#include "physicalslab.hpp"
 
 class TimeSolver;
 class Variable;
@@ -22,13 +23,13 @@ class RungeKuttaStepper : public Stepper {
   ButcherTableau butcher_;
   // Coefficients stay unchanged until a different RK stepper is created.
   std::vector<GpuBuffer<real>> stageWeightsGpu_;
-  GpuBuffer<real> finalWeightsGpu_;
+  GpuBuffer<real> finalWeightsGpu_, errorWeightsGpu_;
   class RungeKuttaStageExecutor;
 };
 
 class RungeKuttaStepper::RungeKuttaStageExecutor {
  public:
-  RungeKuttaStageExecutor(DynamicEquation, const RungeKuttaStepper&);
+  RungeKuttaStageExecutor(DynamicEquation, const RungeKuttaStepper&, bool localRk);
 
   void setStageK(int);
   void setStageX(int);
@@ -39,7 +40,7 @@ class RungeKuttaStepper::RungeKuttaStageExecutor {
  private:
   void gatherStage() const;
   const Ferromagnet* localMagnet_ = nullptr;
-  int firstCell_ = 0, localCells_ = -1;
+  std::optional<PhysicalSlab> slab_;
   Field x0;
   const ButcherTableau& butcher;
   const RungeKuttaStepper& stepper;

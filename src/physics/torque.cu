@@ -20,6 +20,8 @@
 #include "strayfield.hpp"
 #include "dynamicequation.hpp"
 #include "thermalnoise.hpp"
+#include "slabops.hpp"
+#include "fieldops.hpp"
 #include <cstdlib>
 #include <cstring>
 
@@ -54,8 +56,11 @@ __global__ void k_llgtorque(CuField torque,
                             const CuField hField,
                             const CuParameter alpha,
                             const CuParameter gamma,
-                            const CuParameter frozenSpins) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+                            const CuParameter frozenSpins,
+                            int firstCell, int localCells) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= localCells) return;
+  int idx = firstCell + i;
 
   // Don't do anything outside of the grid.
   if (!torque.cellInGrid(idx))
@@ -100,30 +105,44 @@ __global__ void k_llgtorque_fused(CuField torque,
                                            alpha.valueAt(idx), gamma.valueAt(idx)));
 }
 
-const Ferromagnet* localRkMagnet(const DynamicEquation& eq) {
-  const char* flag = std::getenv("MUMAXPLUS_LOCAL_RK");
-  if (flag && std::strcmp(flag, "0") == 0) return nullptr;
+namespace {
+const Ferromagnet* deterministicMagnet(const DynamicEquation& eq) {
   const auto* rhs = dynamic_cast<const FM_FieldQuantity*>(eq.rhs.get());
-  if (!rhs || !rhs->evaluates(evalTorque)) return nullptr;
+  if (!rhs || !(rhs->evaluates(evalTorque) || rhs->evaluates(evalLlgTorque) ||
+                rhs->evaluates(evalRelaxTorque))) return nullptr;
   const auto* magnet = rhs->source();
-  // The standard noise evaluator does not provide a generic assuredZero hook.
+  if (magnet->isSublattice() || eq.x != magnet->magnetization()) return nullptr;
   const auto* noise = dynamic_cast<const FM_FieldQuantity*>(eq.noiseTerm.get());
   const bool zeroNoise = !eq.noiseTerm || eq.noiseTerm->assuredZero() ||
       (noise && noise->source() == magnet && noise->evaluates(evalThermalNoise) &&
        thermalNoiseAssuredZero(magnet));
-  const auto& solver = magnet->world()->timesolver();
+  return zeroNoise ? magnet : nullptr;
+}
+}  // namespace
+
+const Ferromagnet* localRkMagnet(const DynamicEquation& eq) {
+  const char* flag = std::getenv("MUMAXPLUS_LOCAL_RK");
+  if (flag && std::strcmp(flag, "0") == 0) return nullptr;
+  const auto* magnet = deterministicMagnet(eq);
+  if (!magnet) return nullptr;
   const auto& session = magnet->world()->session();
-  if (!session.multiGpuEnabled() || session.size() != 2 ||
-      solver.hasAdaptiveTimeStep() || solver.equations().size() != 1 ||
-      eq.x != magnet->magnetization() ||
-      !zeroNoise ||
-      !spinTransferTorqueAssuredZero(magnet) || !canFuseLlgFields(magnet) ||
-      !magnet->getStrayField(magnet)->supportsLocalSlab()) return nullptr;
+  if (!session.multiGpuEnabled() || session.size() != 2) return nullptr;
+  // Enable the world as a unit: no mixtures with thermal or elastic equations.
+  // RK already updates ALL stage variables before evaluating ANY RHS.
+  for (const auto& other : magnet->world()->timesolver().equations()) {
+    const auto* source = deterministicMagnet(other);
+    if (!source || source->world() != magnet->world()) return nullptr;
+  }
   return magnet;
 }
 
 static Field llgTorque(const Ferromagnet* magnet, bool localOnly) {
   Field torque(magnet->system(), 3);
+  const auto size = torque.grid().size();
+  const auto& session = magnet->world()->session();
+  const PhysicalSlab slab(size.x, size.y, size.z, session.rank(), session.size());
+  const int count = localOnly ? slab.localCells : torque.grid().ncells();
+  const int first = localOnly ? slab.firstCell : 0;
   if (canFuseLlgFields(magnet)) {
     StepCheckpoint checkpoint;
     auto& timings = stepTimings();
@@ -141,37 +160,37 @@ static Field llgTorque(const Ferromagnet* magnet, bool localOnly) {
     auto alpha = magnet->alpha.cu();
     auto gamma = magnet->gamma.cu();
     auto frozenSpins = magnet->frozenSpins.cu();
-    const auto& session = magnet->world()->session();
-    const int count = torque.grid().ncells() / (localOnly ? session.size() : 1);
-    const int first = localOnly ? session.rank() * count : 0;
-    cudaLaunch(count, k_llgtorque_fused, torque.cu(), m,
+    if (count > 0) cudaLaunch(count, k_llgtorque_fused, torque.cu(), m,
                exchange.cu(), demag.cu(), bias, alpha, gamma, frozenSpins,
                first, count);
     // This includes field assembly as well as the LLG arithmetic.
     timings.llg += checkpoint();
     return torque;
   }
-  Field h = evalEffectiveField(magnet);
+  Field h = localOnly ? evalEffectiveFieldLocalSlab(magnet) : evalEffectiveField(magnet);
   StepCheckpoint checkpoint;
   auto m = magnet->magnetization()->field().cu();
   auto alpha = magnet->alpha.cu();
   auto gamma = magnet->gamma.cu();
   auto frozenSpins = magnet->frozenSpins.cu();
-  int ncells = torque.grid().ncells();
-  cudaLaunch(ncells, k_llgtorque, torque.cu(), m, h.cu(), alpha, gamma, frozenSpins);
+  if (count > 0)
+    cudaLaunch(count, k_llgtorque, torque.cu(), m, h.cu(), alpha, gamma, frozenSpins,
+               first, count);
   stepTimings().llg += checkpoint();
   return torque;
 }
 
 Field evalLlgTorque(const Ferromagnet* magnet) { return llgTorque(magnet, false); }
-Field evalLocalLlgTorque(const Ferromagnet* magnet) { return llgTorque(magnet, true); }
 
 __global__ void k_dampingtorque(CuField torque,
                                 const CuField mField,
                                 const CuField hField,
                                 const CuParameter gamma,
-                                const CuParameter frozenSpins) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+                                const CuParameter frozenSpins,
+                                int firstCell, int localCells) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= localCells) return;
+  int idx = firstCell + i;
 
   // Don't do anything outside of the grid.
   if (!torque.cellInGrid(idx))
@@ -190,14 +209,36 @@ __global__ void k_dampingtorque(CuField torque,
   torque.setVectorInCell(idx, t);
 }
 
-Field evalRelaxTorque(const Ferromagnet* magnet) {
+static Field relaxTorque(const Ferromagnet* magnet, bool localOnly) {
   Field torque(magnet->system(), 3);
-  Field h = evalEffectiveField(magnet);
+  Field h = localOnly ? evalEffectiveFieldLocalSlab(magnet) : evalEffectiveField(magnet);
   auto m = magnet->magnetization()->field().cu();
   auto gamma = magnet->gamma.cu();
   auto frozenSpins = magnet->frozenSpins.cu();
-  int ncells = torque.grid().ncells();
-  cudaLaunch(ncells, k_dampingtorque, torque.cu(), m, h.cu(), gamma, frozenSpins);
+  const auto size = torque.grid().size();
+  const auto& session = magnet->world()->session();
+  const PhysicalSlab slab(size.x, size.y, size.z, session.rank(), session.size());
+  const int count = localOnly ? slab.localCells : torque.grid().ncells();
+  if (count > 0)
+    cudaLaunch(count, k_dampingtorque, torque.cu(), m, h.cu(), gamma, frozenSpins,
+               localOnly ? slab.firstCell : 0, count);
+  return torque;
+}
+
+Field evalRelaxTorque(const Ferromagnet* magnet) { return relaxTorque(magnet, false); }
+
+Field evalLocalTorque(const DynamicEquation& eq) {
+  const auto* rhs = static_cast<const FM_FieldQuantity*>(eq.rhs.get());
+  const auto* magnet = rhs->source();
+  if (rhs->evaluates(evalRelaxTorque)) return relaxTorque(magnet, true);
+  Field torque = llgTorque(magnet, true);
+  if (rhs->evaluates(evalTorque) && !spinTransferTorqueAssuredZero(magnet)) {
+    // STT still evaluates a full field; only its owned cells are consumed.
+    const auto size = torque.grid().size();
+    const auto& session = magnet->world()->session();
+    const PhysicalSlab slab(size.x, size.y, size.z, session.rank(), session.size());
+    addToSlab(torque, 1, evalSpinTransferTorque(magnet), slab.firstCell, slab.localCells);
+  }
   return torque;
 }
 

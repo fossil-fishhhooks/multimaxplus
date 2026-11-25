@@ -7,9 +7,9 @@ class Ferromagnet;
 class Field;
 class DynamicEquation;
 
-// Experimental: only the common, fixed-step, single-equation pruned FFT case.
+// Deterministic ordinary-FM equations; stage magnetization remains replicated.
 const Ferromagnet* localRkMagnet(const DynamicEquation&);
-Field evalLocalLlgTorque(const Ferromagnet*);
+Field evalLocalTorque(const DynamicEquation&);
 
 Field evalTorque(const Ferromagnet*);
 Field evalLlgTorque(const Ferromagnet*);

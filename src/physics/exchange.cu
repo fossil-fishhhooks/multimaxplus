@@ -17,12 +17,8 @@
 #include <vector>
 #include <mpi.h>
 #include "session.hpp"
+#include "slabops.hpp"
 
-#if FP_PRECISION == SINGLE
-const MPI_Datatype mpiReal = MPI_FLOAT;
-#elif FP_PRECISION == DOUBLE
-const MPI_Datatype mpiReal = MPI_DOUBLE;
-#endif
 
 bool exchangeAssuredZero(const Ferromagnet* magnet) {
   return ((magnet->aex.assuredZero() && magnet->interExch.assuredZero()) ||
@@ -263,18 +259,8 @@ Field evalEffectiveSublattice(const Ferromagnet* magnet) {
 static Field exchangeField(const Ferromagnet* magnet, bool localOnly) {
   const Session& session = magnet->world()->session();
   const int3 size = magnet->grid().size();
-  const bool is2D = size.z == 1;
-  const int planes = is2D ? size.y : size.z;
-
-  int base = planes / session.size();
-  int extra = planes % session.size();
-
-  int localPlanes = base + (session.rank() < extra);
-  int firstPlane = session.rank() * base + std::min(session.rank(), extra);
-
-  int valuesPerPlane = is2D ? size.x : size.x * size.y;
-  int firstCell = firstPlane * valuesPerPlane;
-  int localCells = localPlanes * valuesPerPlane;
+  const PhysicalSlab slab(size.x, size.y, size.z, session.rank(), session.size());
+  const int firstCell = slab.firstCell, localCells = slab.localCells;
 
   Field hField(magnet->system(), 3);
 
@@ -324,22 +310,8 @@ static Field exchangeField(const Ferromagnet* magnet, bool localOnly) {
     }
   }
 
-  if (session.multiGpuEnabled() && !localOnly) {
-    std::vector<int> counts(session.size());
-    std::vector<int> displs(session.size());
-    for (int r = 0; r < session.size(); r++) {
-      int localPlanes2 = base + (r < extra);
-      int firstPlane2 = r * base + std::min(r, extra);
-      counts[r] = valuesPerPlane * localPlanes2;
-      displs[r] = valuesPerPlane * firstPlane2;
-    }
-
-    checkCudaError(cudaStreamSynchronize(getCudaStream()));
-    for (int comp = 0; comp < 3; comp++) {
-      MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, hField.device_ptr(comp),
-                     counts.data(), displs.data(), mpiReal, session.communicator());
-    }
-  }
+  if (session.multiGpuEnabled() && !localOnly)
+    gatherSlab(hField, slab, session);
   return hField;
 }
 

@@ -22,6 +22,8 @@ add_library(core STATIC
     reduce.hpp
     rungekutta.cpp
     rungekutta.hpp
+    physicalslab.hpp
+    slabops.hpp
     scalarquantity.cpp 
     scalarquantity.hpp
     session.cpp
