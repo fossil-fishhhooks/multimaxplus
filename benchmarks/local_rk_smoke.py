@@ -78,7 +78,7 @@ def main():
         names = [name for name, _ in cases]
         if args.start_case not in names:
             parser.error(f"Unknown start case: {args.start_case}")
-        cases = cases[names.index(args.start_case):]
+        cases = cases[names.index(args.start_case) :]
     for name, shape in cases:
         print(f"rank={rank} starting {name}", flush=True)
         periodic = name == "periodic_z"
@@ -159,8 +159,10 @@ def main():
             def evolve():
                 if adaptive:
                     # Unequal initial dt must be reconciled before the first stage.
-                    solver.steps(1)
-                    solver.run(duration - solver.time)
+                    # The Python wrapper otherwise replaces dt with its own
+                    # sensible estimate, defeating the intentional rejection.
+                    solver.steps(1, initial_timestep=solver.timestep)
+                    solver.run(duration - solver.time, initial_timestep=solver.timestep)
                 else:
                     solver.steps(12)
 
