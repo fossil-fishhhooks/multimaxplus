@@ -96,9 +96,9 @@ def main():
             magnet.bias_magnetic_field = (-0.0246, 0.0043, 0.002)
         magnet = magnets[0]
         if name == "geometry_material_frozen":
-            magnet.aex = np.where(z < shape[2] // 2, 10e-12, 15e-12)
-            magnet.msat = np.where(x < shape[0] // 2, 7e5, 8e5)
-            magnet.frozen_spins = (x == 1).astype(float)
+            magnet.aex = np.where(z < shape[2] // 2, 10e-12, 15e-12)[None, ...]
+            magnet.msat = np.where(x < shape[0] // 2, 7e5, 8e5)[None, ...]
+            magnet.frozen_spins = (x == 1).astype(float)[None, ...]
         if name == "anisotropy_dmi":
             magnet.ku1 = 2e4
             magnet.anisU = (0, 0, 1)
