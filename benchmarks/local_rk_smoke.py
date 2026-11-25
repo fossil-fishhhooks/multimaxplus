@@ -36,6 +36,7 @@ def main():
         "--output", type=Path, default=Path("/tmp/multimax-local-rk-smoke")
     )
     parser.add_argument("--multigpu", action="store_true")
+    parser.add_argument("--start-case", help="Resume at a named case, including it")
     args = parser.parse_args()
     if os.environ.get("OMPI_COMM_WORLD_SIZE") != "2" or not args.multigpu:
         parser.error("Launch with two MPI ranks and --multigpu")
@@ -73,7 +74,13 @@ def main():
         ("thermal_fallback", (8, 6, 4)),
         ("elastic_fallback", (8, 6, 4)),
     ]
+    if args.start_case:
+        names = [name for name, _ in cases]
+        if args.start_case not in names:
+            parser.error(f"Unknown start case: {args.start_case}")
+        cases = cases[names.index(args.start_case):]
     for name, shape in cases:
+        print(f"rank={rank} starting {name}", flush=True)
         periodic = name == "periodic_z"
         world = World(
             (2e-9, 2e-9, 2e-9),

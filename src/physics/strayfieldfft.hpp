@@ -56,6 +56,9 @@ class StrayFieldFFTExecutor : public StrayFieldExecutor {
   const StrayFieldKernel& kernel() const { return kernel_; }
 
  private:
+  // Cleanup must not dereference the source magnet: a different magnet may
+  // own this executor and outlive its source during world destruction.
+  const bool distributed_;
   // Optional row-pruned pipeline; the general cuFFTMp path remains available.
   struct PrunedFFT;
   std::unique_ptr<PrunedFFT> pruned_;

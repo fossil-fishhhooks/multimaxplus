@@ -408,6 +408,7 @@ StrayFieldFFTExecutor::StrayFieldFFTExecutor(const Magnet* magnet,
                                              double eps,
                                              double switchingradius)
     : StrayFieldExecutor(magnet, system),
+      distributed_(magnet->world()->session().multiGpuEnabled()),
       kernel_(system->grid(),
               magnet_->grid(),
               magnet->world(),
@@ -638,8 +639,7 @@ StrayFieldFFTExecutor::StrayFieldFFTExecutor(const Magnet* magnet,
 StrayFieldFFTExecutor::~StrayFieldFFTExecutor() {
   // Finish owning the local plans/buffers before releasing cuFFTMp resources.
   pruned_.reset();
-  const Session& session = magnet_->world()->session();
-  if(session.multiGpuEnabled()){
+  if (distributed_) {
     for (auto desc : mdesc)
       cufftXtFree(desc);
     for (auto desc : kdesc)
