@@ -8,11 +8,6 @@ The current build requires **Linux, CUDA, cuFFTMp, NVSHMEM, and Open MPI**, even
 for normal single-GPU execution. Multi-GPU execution is enabled separately with
 `--multigpu`; normal execution remains the default.
 
-# Performance
-![speedups](docs/diagrams/plots/02_speedup.png)
-![speedups2](docs/diagrams/plots/01_timestep_time.png)
-![timing](docs/diagrams/plots/04_breakdown_512x512x32.png)
-
 ## Requirements
 
 - A Linux system supported by your NVIDIA HPC SDK release.
