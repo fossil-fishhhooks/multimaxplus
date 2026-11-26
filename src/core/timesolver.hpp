@@ -35,7 +35,7 @@ class TimeSolver {
   real maxError() const { return maxError_; }
   real sensibleFactor() const { return sensibleFactor_; }
   real sensibleTimestepDefault() const { return sensibleTimestepDefault_; }
-  real time() const { return time_; }
+  double time() const { return time_; }
   real timestep() const { return timestep_; }
   real upperBound() const { return upperBound_; }
   bool hasAdaptiveTimeStep() const { return !fixedTimeStep_; }
@@ -51,7 +51,7 @@ class TimeSolver {
   void setMaxError(real maxError) { maxError_ = maxError; }
   void setSensibleFactor(real factor) { sensibleFactor_ = factor; }
   void setSensibleTimestepDefault(real dt);
-  void setTime(real time) { time_ = time; }
+  void setTime(double time) { time_ = time; }
   void setTimeStep(real dt) { timestep_ = dt; }
   void setUpperBound(real upperBound) { upperBound_ = upperBound; }
   void enableAdaptiveTimeStep() { fixedTimeStep_ = false; }
@@ -83,7 +83,8 @@ class TimeSolver {
   real maxError_ = 1e-5;
   real sensibleFactor_ = 0.01;
   real sensibleTimestepDefault_ = 1e-14;
-  real time_ = 0.0;
+  // Accumulate time in double even when GPU fields use single precision.
+  double time_ = 0.0;
   real timestep_ = 0.0;
   real upperBound_ = 2.0;
   bool fixedTimeStep_ = false;

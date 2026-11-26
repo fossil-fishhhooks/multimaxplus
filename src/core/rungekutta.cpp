@@ -88,7 +88,7 @@ void RungeKuttaStepper::step() {
     if (result != MPI_SUCCESS) session.abort(result);
     solver_->setTimeStep(dt);
   }
-  real t0 = solver_->time();
+  double t0 = solver_->time();
 
   bool success = false;
   while (!success) {

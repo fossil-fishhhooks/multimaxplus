@@ -147,7 +147,7 @@ void TimeSolver::run(real duration) {
   AdvanceScope advance(*this);
   if (duration <= 0)
     return;
-  real stoptime = time_ + duration;
+  double stoptime = time_ + duration;
   auto runcondition = [this, stoptime]() {
     return this->time() < stoptime - this->timestep();
   };
