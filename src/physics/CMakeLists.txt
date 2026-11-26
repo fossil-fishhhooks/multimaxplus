@@ -16,6 +16,8 @@ add_library(physics STATIC
     constants.hpp
     demag.cpp
     demag.hpp
+    demagextrapolation.cu
+    demagextrapolation.hpp
     newellasymptotic.cu
     newellasymptotic.hpp
     dmi.cu

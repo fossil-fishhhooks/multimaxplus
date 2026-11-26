@@ -21,7 +21,7 @@
 #include "slabops.hpp"
 
 RungeKuttaStepper::RungeKuttaStepper(TimeSolver* solver, RKmethod method)
-    : butcher_(ButcherTableau::get(method)),
+    : butcher_(ButcherTableau::get(method)), method_(method),
       finalWeightsGpu_(butcher_.weights1) {
   setParentTimeSolver(solver);
   stageWeightsGpu_.reserve(butcher_.rkMatrix.size());
@@ -53,6 +53,25 @@ void RungeKuttaStepper::step() {
     int result = MPI_Allreduce(MPI_IN_PLACE, &localRk, 1, MPI_INT, MPI_MIN,
                                session.communicator());
     if (result != MPI_SUCCESS) session.abort(result);
+  }
+
+  const char* extrapolateFlag = std::getenv("MUMAXPLUS_EXTRAPOLATE_DEMAG");
+  int extrapolate = extrapolateFlag && std::strcmp(extrapolateFlag, "1") == 0 &&
+      solver_->allowsDemagExtrapolation() && !solver_->hasAdaptiveTimeStep() &&
+      solver_->equations().size() == 1 && method_ == RKmethod::FEHLBERG &&
+      canExtrapolateDemag(solver_->equations().front());
+  if (session.multiGpuEnabled()) {
+    int result = MPI_Allreduce(MPI_IN_PLACE, &extrapolate, 1, MPI_INT, MPI_MIN,
+                               session.communicator());
+    if (result != MPI_SUCCESS) session.abort(result);
+  }
+  if (!extrapolate) resetDemagHistory();
+  else {
+    if (!demagPredictor_) {
+      const auto* rhs = static_cast<const FM_FieldQuantity*>(solver_->equations().front().rhs.get());
+      demagPredictor_ = std::make_unique<DemagExtrapolator>(rhs->source(), localRk != 0);
+    }
+    demagPredictor_->beginStep(solver_->time());
   }
 
   // construct a Runge Kutta stage executor for every equation
@@ -146,6 +165,10 @@ void RungeKuttaStepper::step() {
          << " demag-multiply=" << timings.demagMultiply
          << " demag-inverse=" << timings.demagInverse
          << " demag-crop=" << timings.demagCrop << " demag-gather=" << timings.demagGather
+         << " demag-exact=" << timings.demagExact
+         << " demag-predicted=" << timings.demagPredicted
+         << " demag-history=" << timings.demagHistory
+         << " demag-predict=" << timings.demagPredict
          << " external=" << timings.external << " other-fields=" << timings.otherFields
          << " field-add=" << timings.fieldAdd << " llg=" << timings.llg
          << " error=" << timings.error << " ms\n";
@@ -176,7 +199,9 @@ RungeKuttaStepper::RungeKuttaStageExecutor::RungeKuttaStageExecutor(
 }
 
 void RungeKuttaStepper::RungeKuttaStageExecutor::setStageK(int stage) {
-  k[stage] = localMagnet_ ? evalLocalTorque(eq_) : eq_.rhs->eval();
+  if (stepper.demagPredictor_)
+    k[stage] = evalRkTorque(eq_, localMagnet_ != nullptr, stepper.demagPredictor_.get());
+  else k[stage] = localMagnet_ ? evalLocalTorque(eq_) : eq_.rhs->eval();
 
   auto dt = stepper.solver_->timestep();
   if (noise)

@@ -39,6 +39,7 @@ class TimeSolver {
   real timestep() const { return timestep_; }
   real upperBound() const { return upperBound_; }
   bool hasAdaptiveTimeStep() const { return !fixedTimeStep_; }
+  bool allowsDemagExtrapolation() const { return advancing_ && !postStep_; }
 
   //------------- SET SOLVER SETTINGS ------------------------------------------
 
@@ -87,6 +88,8 @@ class TimeSolver {
   real upperBound_ = 2.0;
   bool fixedTimeStep_ = false;
   std::function<void()> postStep_ = nullptr;
+  bool advancing_ = false;
+  class AdvanceScope;
   std::vector<DynamicEquation> eqs_;
 
   //------------- THE INTERNAL STEPPER -----------------------------------------

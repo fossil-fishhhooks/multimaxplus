@@ -6,10 +6,13 @@
 class Ferromagnet;
 class Field;
 class DynamicEquation;
+class DemagExtrapolator;
 
 // Deterministic ordinary-FM equations; stage magnetization remains replicated.
 const Ferromagnet* localRkMagnet(const DynamicEquation&);
 Field evalLocalTorque(const DynamicEquation&);
+bool canExtrapolateDemag(const DynamicEquation&);
+Field evalRkTorque(const DynamicEquation&, bool localOnly, DemagExtrapolator*);
 
 Field evalTorque(const Ferromagnet*);
 Field evalLlgTorque(const Ferromagnet*);

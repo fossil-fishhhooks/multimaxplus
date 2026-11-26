@@ -115,7 +115,23 @@ void TimeSolver::step() {
   postStep();
 }
 
+class TimeSolver::AdvanceScope {
+ public:
+  explicit AdvanceScope(TimeSolver& solver) : solver_(solver), previous_(solver.advancing_) {
+    solver_.stepper_->resetDemagHistory();
+    solver_.advancing_ = true;
+  }
+  ~AdvanceScope() {
+    solver_.stepper_->resetDemagHistory();
+    solver_.advancing_ = previous_;
+  }
+ private:
+  TimeSolver& solver_;
+  bool previous_;
+};
+
 void TimeSolver::steps(unsigned int nSteps) {
+  AdvanceScope advance(*this);
   for (int i = 0; i < nSteps; i++) {
     step();
   }
@@ -128,6 +144,7 @@ void TimeSolver::runwhile(std::function<bool(void)> runcondition) {
 }
 
 void TimeSolver::run(real duration) {
+  AdvanceScope advance(*this);
   if (duration <= 0)
     return;
   real stoptime = time_ + duration;

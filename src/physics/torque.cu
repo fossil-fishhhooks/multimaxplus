@@ -3,6 +3,7 @@
 #include "antiferromagnet.hpp"
 #include "anisotropy.hpp"
 #include "demag.hpp"
+#include "demagextrapolation.hpp"
 #include "dmi.hpp"
 #include "exchange.hpp"
 #include "magnetoelasticfield.hpp"
@@ -136,7 +137,17 @@ const Ferromagnet* localRkMagnet(const DynamicEquation& eq) {
   return magnet;
 }
 
-static Field llgTorque(const Ferromagnet* magnet, bool localOnly) {
+bool canExtrapolateDemag(const DynamicEquation& eq) {
+  const auto* magnet = deterministicMagnet(eq);
+  if (!magnet || !canFuseLlgFields(magnet) || magnet->msat.isDynamic()) return false;
+  const auto* rhs = static_cast<const FM_FieldQuantity*>(eq.rhs.get());
+  if (!(rhs->evaluates(evalTorque) || rhs->evaluates(evalLlgTorque))) return false;
+  const auto pbc = magnet->world()->pbcRepetitions();
+  return pbc.x == 0 && pbc.y == 0 && pbc.z == 0;
+}
+
+static Field llgTorque(const Ferromagnet* magnet, bool localOnly,
+                       DemagExtrapolator* predictor = nullptr) {
   Field torque(magnet->system(), 3);
   const auto size = torque.grid().size();
   const auto& session = magnet->world()->session();
@@ -152,8 +163,9 @@ static Field llgTorque(const Ferromagnet* magnet, bool localOnly) {
     const real3 bias = magnet->mumaxWorld()->biasMagneticField +
                        magnet->biasMagneticField.getUniformValue();
     timings.external += checkpoint();
-    Field demag = localOnly ? magnet->getStrayField(magnet)->evalLocalSlab()
-                            : evalDemagField(magnet);
+    Field demag = predictor ? predictor->eval(magnet->world()->time())
+                            : (localOnly ? magnet->getStrayField(magnet)->evalLocalSlab()
+                                         : evalDemagField(magnet));
     timings.demag += checkpoint();
 
     auto m = magnet->magnetization()->field().cu();
@@ -227,19 +239,26 @@ static Field relaxTorque(const Ferromagnet* magnet, bool localOnly) {
 
 Field evalRelaxTorque(const Ferromagnet* magnet) { return relaxTorque(magnet, false); }
 
-Field evalLocalTorque(const DynamicEquation& eq) {
+Field evalRkTorque(const DynamicEquation& eq, bool localOnly,
+                    DemagExtrapolator* predictor) {
   const auto* rhs = static_cast<const FM_FieldQuantity*>(eq.rhs.get());
   const auto* magnet = rhs->source();
-  if (rhs->evaluates(evalRelaxTorque)) return relaxTorque(magnet, true);
-  Field torque = llgTorque(magnet, true);
+  if (rhs->evaluates(evalRelaxTorque)) return relaxTorque(magnet, localOnly);
+  Field torque = llgTorque(magnet, localOnly, predictor);
   if (rhs->evaluates(evalTorque) && !spinTransferTorqueAssuredZero(magnet)) {
     // STT still evaluates a full field; only its owned cells are consumed.
     const auto size = torque.grid().size();
     const auto& session = magnet->world()->session();
     const PhysicalSlab slab(size.x, size.y, size.z, session.rank(), session.size());
-    addToSlab(torque, 1, evalSpinTransferTorque(magnet), slab.firstCell, slab.localCells);
+    if (localOnly)
+      addToSlab(torque, 1, evalSpinTransferTorque(magnet), slab.firstCell, slab.localCells);
+    else addTo(torque, 1, evalSpinTransferTorque(magnet));
   }
   return torque;
+}
+
+Field evalLocalTorque(const DynamicEquation& eq) {
+  return evalRkTorque(eq, true, nullptr);
 }
 
 real evalMaxTorque(const Ferromagnet* magnet) {

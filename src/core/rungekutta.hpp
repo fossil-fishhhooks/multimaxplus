@@ -8,6 +8,7 @@
 #include "field.hpp"
 #include "stepper.hpp"
 #include "physicalslab.hpp"
+#include "demagextrapolation.hpp"
 
 class TimeSolver;
 class Variable;
@@ -17,10 +18,13 @@ class RungeKuttaStepper : public Stepper {
  public:
   RungeKuttaStepper(TimeSolver*, RKmethod);
   int nStages() const;
+  void resetDemagHistory() override { demagPredictor_.reset(); }
   void step();
 
  private:
   ButcherTableau butcher_;
+  RKmethod method_;
+  std::unique_ptr<DemagExtrapolator> demagPredictor_;
   // Coefficients stay unchanged until a different RK stepper is created.
   std::vector<GpuBuffer<real>> stageWeightsGpu_;
   GpuBuffer<real> finalWeightsGpu_, errorWeightsGpu_;
