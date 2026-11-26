@@ -46,12 +46,48 @@ def advance(solver, count):
     return exact, predicted
 
 
+
+def make_case(shape, case="relaxation"):
+    """Construct a deterministic supported FM; no callbacks or time-dependent terms."""
+    from mumaxplus import Ferromagnet, Grid, World
+
+    nx, ny, nz = shape
+    cellsize = (2e-9, 2e-9, 2e-9)
+    world = World(cellsize)
+    magnet = Ferromagnet(world, Grid(tuple(shape)))
+    magnet.msat = 8e5
+    magnet.aex = 13e-12
+    magnet.alpha = 0.1
+    magnet.temperature = 0
+    bias = (-0.15, 0.03, 0.005) if case == "reversal" else (-0.0246, 0.0043, 0.002)
+    magnet.bias_magnetic_field = bias
+    # Broadcasting keeps temporary arrays small on the performance grids.
+    x = np.arange(nx)[None, None, :]
+    y = np.arange(ny)[None, :, None]
+    z = np.arange(nz)[:, None, None]
+    initial = np.empty((3, nz, ny, nx))
+    if case == "reversal":
+        initial[0] = 1
+        initial[1] = 0.02 + 0.01 * np.cos(2 * np.pi * y / ny)
+        initial[2] = 0.01 + 0.01 * np.sin(2 * np.pi * x / nx)
+    else:
+        initial[0] = 1 + 0.1 * np.sin(2 * np.pi * x / nx)
+        initial[1] = 0.2 + 0.1 * np.cos(2 * np.pi * y / ny)
+        initial[2] = 0.1 + 0.1 * np.sin(2 * np.pi * z / nz)
+    magnet.magnetization = initial
+    solver = world.timesolver
+    solver.set_method("Fehlberg")
+    solver.adaptive_timestep = False
+    return world, magnet, solver
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--build-dir", default="build-a100")
     parser.add_argument("--multigpu", action="store_true")
+    parser.add_argument("--case", choices=("relaxation", "reversal"), default="relaxation")
     parser.add_argument("--grid", type=int, nargs=3, default=(32, 32, 8), metavar=("NX", "NY", "NZ"))
     parser.add_argument("--times-ps", type=float, nargs="+", default=(1, 10, 100))
     parser.add_argument("--dt-ps", type=float, default=0.1)
@@ -76,24 +112,21 @@ def main():
     if not build.is_absolute():
         build = root / build
     sys.path[:0] = [str(root), str(build / "src/bindings")]
-    from mumaxplus import Ferromagnet, Grid, World, _cpp
+    from mumaxplus import _cpp
 
     if not Path(_cpp.__file__).resolve().is_relative_to(build.resolve()):
         raise RuntimeError(f"Wrong backend: {_cpp.__file__}")
     os.environ["MUMAXPLUS_PROFILE_STEPS"] = "1"
     nx, ny, nz = args.grid
-    z, y, x = np.indices((nz, ny, nx))
     geometry = np.ones((nz, ny, nx), dtype=bool)
-    initial = np.stack((1 + 0.1 * np.sin(2 * np.pi * x / nx),
-                        0.2 + 0.1 * np.cos(2 * np.pi * y / ny),
-                        0.1 + 0.1 * np.sin(2 * np.pi * z / nz)))
     cellsize = (2e-9, 2e-9, 2e-9)
     if rank == 0:
         args.output.mkdir(parents=True, exist_ok=True)
         metadata = dict(grid=args.grid, cellsize=cellsize, times_ps=args.times_ps,
                         base_dt_ps=args.dt_ps, multigpu=args.multigpu,
                         backend=str(_cpp.__file__), method="Fehlberg", msat=8e5,
-                        aex=13e-12, alpha=0.1, bias=(-0.0246, 0.0043, 0.002),
+                        aex=13e-12, alpha=0.1, case=args.case,
+                        bias=(-0.15, 0.03, 0.005) if args.case == "reversal" else (-0.0246, 0.0043, 0.002),
                         max_error=args.max_error)
         (args.output / "settings.json").write_text(json.dumps(metadata, indent=2) + "\n")
         print(f"Snapshots and errors: {args.output}", flush=True)
@@ -106,17 +139,7 @@ def main():
                                  ("extrapolated", 2), ("extrapolated", 1)]:
             enabled = mode == "extrapolated"
             os.environ["MUMAXPLUS_EXTRAPOLATE_DEMAG"] = str(int(enabled))
-            world = World(cellsize)
-            magnet = Ferromagnet(world, Grid(tuple(args.grid)))
-            magnet.msat = 8e5
-            magnet.aex = 13e-12
-            magnet.alpha = 0.1
-            magnet.temperature = 0
-            magnet.bias_magnetic_field = (-0.0246, 0.0043, 0.002)
-            magnet.magnetization = initial
-            solver = world.timesolver
-            solver.set_method("Fehlberg")
-            solver.adaptive_timestep = False
+            world, magnet, solver = make_case(args.grid, args.case)
             solver.timestep = args.dt_ps * 1e-12 / refinement
             count = round(time_ps / args.dt_ps) * refinement
             exact, predicted = advance(solver, count)
@@ -135,8 +158,9 @@ def main():
                 np.savez(args.output / f"{label}.npz", m=m, geometry=geometry,
                          time=actual_time, target_time=time_ps * 1e-12,
                          dt=solver.timestep, grid=args.grid, cellsize=cellsize,
-                         extrapolated=enabled, exact_evaluations=exact,
+                         case=args.case, extrapolated=enabled, exact_evaluations=exact,
                          predicted_evaluations=predicted)
+                mean_m = m.astype(np.float64).mean(axis=(1, 2, 3))
                 states[mode, refinement] = m
                 comparisons = [("fine_reference", states["exact", 4])]
                 if enabled:
@@ -145,6 +169,7 @@ def main():
                     maximum, rms = errors(m, reference, geometry)
                     rows.append(dict(time_ps=time_ps, actual_time_s=actual_time,
                                      mode=mode, dt_ps=args.dt_ps / refinement,
+                                     mean_mx=mean_m[0], mean_my=mean_m[1], mean_mz=mean_m[2],
                                      comparison=comparison, max_error=maximum,
                                      rms_error=rms, exact_evaluations=exact,
                                      predicted_evaluations=predicted))
@@ -152,7 +177,7 @@ def main():
                         failed |= maximum > args.max_error
                     print(f"{time_ps:g} ps {mode} dt={args.dt_ps / refinement:g} ps "
                           f"vs {comparison}: max={maximum:.3e} rms={rms:.3e} "
-                          f"exact/predicted={exact}/{predicted}", flush=True)
+                          f"exact/predicted={exact}/{predicted} mean_mx={mean_m[0]:.5f}", flush=True)
                 with (args.output / "errors.csv").open("w", newline="") as output:
                     writer = csv.DictWriter(output, fieldnames=list(rows[0]))
                     writer.writeheader()
