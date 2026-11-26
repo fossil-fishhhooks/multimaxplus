@@ -38,7 +38,7 @@ void GpuMemoryPool::free(void** ptr) {
 
 void GpuMemoryPool::recycle(void** ptr) {
   auto inUseIt = inUse_.find(*ptr);
-  int size = inUseIt->second;
+  const size_t size = inUseIt->second;
   inUse_.erase(inUseIt);
   pool_[size].push_back(*ptr);
   *ptr = nullptr;
@@ -49,7 +49,7 @@ void GpuMemoryPool::printInfo() const {
   //   key           memory block size
   //   value.first   in use count
   //   value.second  in pool count
-  std::map<size_t, std::pair<int, int>> memoryUse;
+  std::map<size_t, std::pair<size_t, size_t>> memoryUse;
 
   // count number of used memory blocks (for each memory block size seperately)
   for (auto u : inUse_)
@@ -59,7 +59,7 @@ void GpuMemoryPool::printInfo() const {
   for (const auto& p : pool_)
     memoryUse[p.first].second = p.second.size();
 
-  int totalMemUsed = 0;
+  size_t totalMemUsed = 0;
   for (auto b : memoryUse) {
     totalMemUsed += b.first * (b.second.first + b.second.second);
   }
