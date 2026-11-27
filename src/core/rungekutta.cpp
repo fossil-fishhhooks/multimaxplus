@@ -111,6 +111,14 @@ void RungeKuttaStepper::step() {
     for (auto& eq : equations)
       eq.setFinalX();
 
+    if (demagPredictor_ && !demagPredictor_->checkStep(solver_->time())) {
+      for (auto& eq : equations) eq.resetX();
+      solver_->setTime(t0);
+      demagPredictor_->retryExact();
+      ++timings.demagRetries;
+      continue;
+    }
+
     // nothing more to do if time step is fixed
     if (!solver_->hasAdaptiveTimeStep())
       break;
@@ -169,6 +177,10 @@ void RungeKuttaStepper::step() {
          << " demag-predicted=" << timings.demagPredicted
          << " demag-history=" << timings.demagHistory
          << " demag-predict=" << timings.demagPredict
+         << " demag-checks=" << timings.demagChecks
+         << " demag-retries=" << timings.demagRetries
+         << " demag-check-ratio=" << timings.demagCheckRatio
+         << " demag-check=" << timings.demagCheck
          << " external=" << timings.external << " other-fields=" << timings.otherFields
          << " field-add=" << timings.fieldAdd << " llg=" << timings.llg
          << " error=" << timings.error << " ms\n";
@@ -243,7 +255,9 @@ void RungeKuttaStepper::RungeKuttaStageExecutor::gatherStage() const {
 }
 
 void RungeKuttaStepper::RungeKuttaStageExecutor::resetX() {
-  x = x0;
+  // Predictor rollback restores the already-normalized saved bits exactly.
+  if (stepper.demagPredictor_) x.Variable::set(x0);
+  else x = x0;
 }
 
 real RungeKuttaStepper::RungeKuttaStageExecutor::getError() const {

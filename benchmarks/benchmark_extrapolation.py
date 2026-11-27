@@ -19,7 +19,7 @@ from benchmark_suite import Driver, label, shape_arg, write_json
 from demag_extrapolation import advance, make_case
 
 
-MODES = {"normal": (1, False), "exact2": (2, False), "extrapolated2": (2, True)}
+MODES = {"normal": (1, False), "exact2": (2, False), "unchecked2": (2, True), "extrapolated2": (2, True)}
 
 
 def worker(args):
@@ -40,12 +40,18 @@ def worker(args):
     # Explicit settings prevent inherited shell flags changing the comparison.
     os.environ["MUMAXPLUS_PRUNE_DEMAG"] = "1"
     os.environ["MUMAXPLUS_LOCAL_RK"] = "1"
+    os.environ["MUMAXPLUS_DEMAG_CHECK"] = "0" if args.worker == "unchecked2" else "1"
+    os.environ["MUMAXPLUS_DEMAG_ATOL"] = str(args.atol)
+    os.environ["MUMAXPLUS_DEMAG_RTOL"] = str(args.rtol)
     os.environ["MUMAXPLUS_PROFILE_STEPS"] = "1"
-    world, magnet, solver = make_case(args.grid)
+    world, magnet, solver = make_case(args.grid, args.case, args.cellsize_nm)
     solver.timestep = args.dt_ps * 1e-12
     driver = Driver()
-    exact, predicted = advance(solver, 6)
-    if (enabled and (exact, predicted) != (31, 5)) or (not enabled and predicted):
+    stats = advance(solver, 6, details=True)
+    exact, predicted = stats["exact"], stats["predicted"]
+    expected = 36 + 6 * stats["retries"] + 2 * stats["checks"]
+    if (enabled and (predicted == 0 or exact + predicted != expected or
+                     (args.worker == "extrapolated2" and stats["checks"] == 0))) or (not enabled and predicted):
         raise RuntimeError(f"Activation mismatch: exact/predicted={exact}/{predicted}")
     os.environ["MUMAXPLUS_PROFILE_STEPS"] = "0"
     solver.steps(args.warmup)
@@ -62,7 +68,7 @@ def worker(args):
     write_json(args.output / f"rank-{rank}.json", dict(
         rank=rank, mode=args.worker, backend=str(_cpp.__file__),
         intervals=intervals, mean_m=mean.tolist(), final_time_s=solver.time,
-        probe_exact=exact, probe_predicted=predicted,
+        probe_exact=exact, probe_predicted=predicted, probe_checks=stats["checks"], probe_retries=stats["retries"],
     ))
 
 
@@ -83,6 +89,10 @@ def main():
     parser.add_argument("--build-dir", type=Path, default=Path("build-a100"))
     parser.add_argument("--sizes", type=shape_arg, nargs="+", default=[(512, 512, 32), (1024, 1024, 32)])
     parser.add_argument("--dt-ps", type=float, default=0.1)
+    parser.add_argument("--case", choices=("relaxation", "reversal", "domain_wall", "spin_wave", "material", "shaped"), default="relaxation")
+    parser.add_argument("--cellsize-nm", type=float, default=2.0)
+    parser.add_argument("--atol", type=float, default=1e-6)
+    parser.add_argument("--rtol", type=float, default=1e-4)
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--batches", type=int, default=3)
@@ -96,6 +106,8 @@ def main():
         parser.error("Need steps >= 6, warmup >= 0, batches >= 1")
     if not (0 < args.dt_ps < float("inf")):
         parser.error("dt must be finite and positive")
+    if not (0 <= args.atol < float("inf") and 0 <= args.rtol < float("inf") and 0 < args.cellsize_nm < float("inf")):
+        parser.error("Invalid tolerances or cellsize")
     if args.worker:
         worker(args)
         return
@@ -104,7 +116,7 @@ def main():
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=False)
     write_json(args.output / "settings.json", dict(
-        dt_ps=args.dt_ps, steps=args.steps, warmup=args.warmup, batches=args.batches,
+        dt_ps=args.dt_ps, atol=args.atol, rtol=args.rtol, case=args.case, cellsize_nm=args.cellsize_nm, steps=args.steps, warmup=args.warmup, batches=args.batches,
         sizes=args.sizes, build_dir=str(args.build_dir),
         timing="single-host rank span; includes predictor startup in every batch",
     ))
@@ -118,7 +130,9 @@ def main():
                        "--worker", mode, "--grid", label(grid),
                        "--build-dir", str(args.build_dir), "--output", str(job),
                        "--dt-ps", str(args.dt_ps), "--steps", str(args.steps),
-                       "--warmup", str(args.warmup), "--batches", str(args.batches)]
+                       "--warmup", str(args.warmup), "--batches", str(args.batches),
+                       "--case", args.case, "--cellsize-nm", str(args.cellsize_nm),
+                       "--atol", str(args.atol), "--rtol", str(args.rtol)]
             if ranks > 1:
                 command.append("--multigpu")
                 command = [args.mpirun, "--allow-run-as-root", "--bind-to", "none", "-n", str(ranks)] + command
